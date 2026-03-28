@@ -53,6 +53,13 @@ class GameStateMachine:
     def tracks(self) -> list[str]:
         return list(self._tracks)
 
+    def reset(self) -> None:
+        """Reset to WAITING_FOR_MATCH, clearing all match data."""
+        self._match_settings = None
+        self._tracks = []
+        self._track_detector._last_match_time = 0.0
+        self._transition(GameState.WAITING_FOR_MATCH)
+
     # -- main update -------------------------------------------------------
 
     def update(self, frame: np.ndarray) -> None:

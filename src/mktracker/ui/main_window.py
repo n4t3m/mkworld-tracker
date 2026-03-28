@@ -74,6 +74,16 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(refresh_btn)
 
         toolbar.addStretch()
+
+        self._state_label = QLabel()
+        self._state_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        self._update_state_label()
+        toolbar.addWidget(self._state_label)
+
+        reset_btn = QPushButton("Reset State")
+        reset_btn.clicked.connect(self._on_reset)
+        toolbar.addWidget(reset_btn)
+
         layout.addLayout(toolbar)
 
         # --- video display ---
@@ -157,6 +167,14 @@ class MainWindow(QMainWindow):
 
     def _run_detection(self, frame: np.ndarray) -> None:
         self._state_machine.update(frame)
+        self._update_state_label()
+
+    def _update_state_label(self) -> None:
+        self._state_label.setText(self._state_machine.state.name)
+
+    def _on_reset(self) -> None:
+        self._state_machine.reset()
+        self._update_state_label()
 
     # ------------------------------------------------------------------
     # Cleanup
