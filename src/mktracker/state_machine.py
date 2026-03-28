@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import re
 import time
+from datetime import datetime
 from enum import Enum, auto
+from pathlib import Path
 
+import cv2
 import numpy as np
 
 from mktracker.detection.match_settings import MatchSettings, MatchSettingsDetector
@@ -15,6 +19,9 @@ logger = logging.getLogger(__name__)
 
 # How long to wait after match settings are detected before looking for tracks.
 _MATCH_START_DELAY = 5.0
+
+# Directory where debug frames are saved.
+_DEBUG_DIR = Path("debug_frames")
 
 
 class GameState(Enum):
@@ -41,6 +48,7 @@ class GameStateMachine:
 
         self._match_settings: MatchSettings | None = None
         self._races: list[RaceInfo] = []
+        self._match_dir: Path | None = None
 
         self._match_detector = MatchSettingsDetector()
         self._track_detector = TrackSelectDetector()
@@ -87,6 +95,9 @@ class GameStateMachine:
             return
         self._match_settings = settings
         self._races = []
+        self._match_dir = _DEBUG_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._match_dir.mkdir(parents=True, exist_ok=True)
+        self._save_frame(frame, "match_settings")
         logger.info(
             "Match detected — %s, %s, %s, %s, %d races, %s",
             settings.cc_class,
@@ -114,11 +125,22 @@ class GameStateMachine:
 
         race = RaceInfo(track_name=track_name, players=player_names)
         self._races.append(race)
+        self._save_frame(frame, f"race_{len(self._races):02d}_{track_name}")
 
         total = self._match_settings.race_count if self._match_settings else "?"
         logger.info("Race %d/%s: %s", len(self._races), total, track_name)
         for name in player_names:
             logger.info("  - %s", name)
+
+    # -- debug helpers -----------------------------------------------------
+
+    def _save_frame(self, frame: np.ndarray, label: str) -> None:
+        if self._match_dir is None:
+            return
+        safe = re.sub(r"[^\w\-]", "_", label)
+        path = self._match_dir / f"{safe}.png"
+        cv2.imwrite(str(path), frame)
+        logger.debug("Saved debug frame: %s", path)
 
     # -- transitions -------------------------------------------------------
 

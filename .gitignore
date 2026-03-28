@@ -20,6 +20,9 @@ env/
 .idea/
 *.swp
 
+# Debug
+debug_frames/
+
 # OS
 .DS_Store
 Thumbs.db
