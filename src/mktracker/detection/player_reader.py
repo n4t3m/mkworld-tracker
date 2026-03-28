@@ -23,7 +23,6 @@ _GAP_SEARCH_RIGHT = 0.35
 
 # Cell crop ratios (relative to individual cell width).
 _AVATAR_SKIP = 0.17       # skip avatar on left
-_SCORE_WIDTH = 0.14       # rightmost portion is the score
 
 _OCR_SCALE = 3
 _CELL_PAD_Y = 12          # pixels to skip at top/bottom of cell
@@ -32,14 +31,13 @@ _CELL_PAD_Y = 12          # pixels to skip at top/bottom of cell
 @dataclasses.dataclass(frozen=True)
 class PlayerInfo:
     name: str
-    score: int
 
 
 class PlayerReader:
-    """Reads player names and scores from the track-selection screen."""
+    """Reads player names from the track-selection screen."""
 
     def read_players(self, frame: np.ndarray) -> list[PlayerInfo]:
-        """Return all visible players (name + score) from the left panel."""
+        """Return all visible players from the left panel."""
         h, w = frame.shape[:2]
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -133,22 +131,20 @@ class PlayerReader:
                 break
         left_col = (left_start, left_end) if left_start and left_end else None
 
-        # Right column: starts after gap.  The right edge is estimated from
-        # the left column width because score text is too dim for a brightness
-        # scan to find the true box edge reliably.
+        # Right column: starts after gap, scan right for edge but cap at
+        # the left panel boundary.
         right_start = None
         right_limit = int(w * _LEFT_PANEL_RIGHT)
         for x in range(gap_center, right_limit):
             if profile[x] > _ROW_BRIGHTNESS_MIN:
                 right_start = x
                 break
-        if left_col is not None and right_start is not None:
-            left_width = left_col[1] - left_col[0]
-            # Right column is typically ~73% as wide as left column.
-            right_end = min(right_start + int(left_width * 0.74), right_limit)
-            right_col = (right_start, right_end)
-        else:
-            right_col = None
+        right_end = None
+        for x in range(right_limit, gap_center, -1):
+            if profile[x] > _ROW_BRIGHTNESS_MIN:
+                right_end = x
+                break
+        right_col = (right_start, right_end) if right_start and right_end else None
 
         return left_col, right_col
 
@@ -176,18 +172,12 @@ class PlayerReader:
 
         # ---- name ----
         name_x1 = cx1 + int(box_w * _AVATAR_SKIP)
-        name_x2 = cx2 - int(box_w * _SCORE_WIDTH)
-        name = self._ocr_region(frame, ry1, ry2, name_x1, name_x2)
+        name = self._ocr_region(frame, ry1, ry2, name_x1, cx2)
         name = _clean_name(name)
         if len(name) < 1:
             return None
 
-        # ---- score ----
-        score_x1 = cx2 - int(box_w * _SCORE_WIDTH)
-        score_text = self._ocr_score(frame, ry1, ry2, score_x1, cx2 - 5)
-        score = _parse_score(score_text)
-
-        return PlayerInfo(name=name, score=score)
+        return PlayerInfo(name=name)
 
     @staticmethod
     def _ocr_region(
@@ -205,36 +195,23 @@ class PlayerReader:
         )
         return pytesseract.image_to_string(otsu, config="--psm 7").strip()
 
-    @staticmethod
-    def _ocr_score(
-        frame: np.ndarray, ry1: int, ry2: int, x1: int, x2: int
-    ) -> str:
-        """OCR a score region using a low fixed threshold (scores are dim)."""
-        cell = frame[ry1 + _CELL_PAD_Y : ry2 - _CELL_PAD_Y, x1:x2]
-        if cell.size == 0:
-            return ""
-        cell_up = cv2.resize(
-            cell, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC
-        )
-        gray = cv2.cvtColor(cell_up, cv2.COLOR_BGR2GRAY)
-        # Scores are dimmer than names — use a low fixed threshold.
-        _, thresh = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY)
-        return pytesseract.image_to_string(
-            thresh, config="--psm 8 digits"
-        ).strip()
-
 
 def _clean_name(text: str) -> str:
-    """Remove leading avatar-icon noise from OCR text."""
-    # Single non-alnum char + space → avatar edge artefact
-    text = re.sub(r"^[^a-zA-Z0-9]\s+", "", text)
-    # Single lowercase/digit + space before uppercase → avatar noise
+    """Remove avatar-icon noise and box-edge artefacts from OCR text."""
+    # --- leading noise (avatar icon leaking into crop) ---
+    # One or more non-alnum chars (possibly with commas/spaces) at the start
+    text = re.sub(r"^[^a-zA-Z0-9]+[\s,]*", "", text)
+    # Single lowercase letter or digit + space before an uppercase letter
     text = re.sub(r"^[a-z0-9]\s+(?=[A-Z])", "", text)
-    # Strip trailing pipe/bracket artefacts
+    # Two lowercase letters + comma/space (e.g. "ma Kod49", "e, Kaleb")
+    text = re.sub(r"^[a-z]{1,2}[,\s]+", "", text)
+
+    # --- trailing noise (score digits / box border artefacts) ---
+    # Trailing " <letters>)" pattern from box edge
+    text = re.sub(r"\s+\w{0,2}[)}\]]+$", "", text)
+    # Trailing bare digits (leftover scores)
+    text = re.sub(r"\s+\d+\s*$", "", text)
+    # Trailing pipe/bracket
     text = re.sub(r"\s*[|}\]]+$", "", text)
+
     return text.strip()
-
-
-def _parse_score(text: str) -> int:
-    m = re.search(r"\d+", text)
-    return int(m.group()) if m else 0

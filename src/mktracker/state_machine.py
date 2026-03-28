@@ -8,7 +8,7 @@ from enum import Enum, auto
 import numpy as np
 
 from mktracker.detection.match_settings import MatchSettings, MatchSettingsDetector
-from mktracker.detection.player_reader import PlayerInfo, PlayerReader
+from mktracker.detection.player_reader import PlayerReader
 from mktracker.detection.track_select import TrackSelectDetector
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ class GameState(Enum):
 @dataclasses.dataclass(frozen=True)
 class RaceInfo:
     track_name: str
-    players: tuple[PlayerInfo, ...]
+    players: tuple[str, ...]
 
 
 class GameStateMachine:
@@ -108,15 +108,17 @@ class GameStateMachine:
         if result is None:
             return
         track_name = result["track_name"]
-        players = tuple(self._player_reader.read_players(frame))
+        player_names = tuple(
+            p.name for p in self._player_reader.read_players(frame)
+        )
 
-        race = RaceInfo(track_name=track_name, players=players)
+        race = RaceInfo(track_name=track_name, players=player_names)
         self._races.append(race)
 
         total = self._match_settings.race_count if self._match_settings else "?"
         logger.info("Race %d/%s: %s", len(self._races), total, track_name)
-        for p in players:
-            logger.info("  %s — %d pts", p.name, p.score)
+        for name in player_names:
+            logger.info("  - %s", name)
 
     # -- transitions -------------------------------------------------------
 
