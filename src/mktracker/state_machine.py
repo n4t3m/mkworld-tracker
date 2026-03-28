@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from enum import Enum, auto
@@ -7,6 +8,7 @@ from enum import Enum, auto
 import numpy as np
 
 from mktracker.detection.match_settings import MatchSettings, MatchSettingsDetector
+from mktracker.detection.player_reader import PlayerInfo, PlayerReader
 from mktracker.detection.track_select import TrackSelectDetector
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,12 @@ class GameState(Enum):
     RACING = auto()
 
 
+@dataclasses.dataclass(frozen=True)
+class RaceInfo:
+    track_name: str
+    players: tuple[PlayerInfo, ...]
+
+
 class GameStateMachine:
     """Orchestrates detection across game states.
 
@@ -32,10 +40,11 @@ class GameStateMachine:
         self._state_entered_at = time.monotonic()
 
         self._match_settings: MatchSettings | None = None
-        self._tracks: list[str] = []
+        self._races: list[RaceInfo] = []
 
         self._match_detector = MatchSettingsDetector()
         self._track_detector = TrackSelectDetector()
+        self._player_reader = PlayerReader()
 
         logger.info("State: WAITING_FOR_MATCH")
 
@@ -50,13 +59,13 @@ class GameStateMachine:
         return self._match_settings
 
     @property
-    def tracks(self) -> list[str]:
-        return list(self._tracks)
+    def races(self) -> list[RaceInfo]:
+        return list(self._races)
 
     def reset(self) -> None:
         """Reset to WAITING_FOR_MATCH, clearing all match data."""
         self._match_settings = None
-        self._tracks = []
+        self._races = []
         self._track_detector._last_match_time = 0.0
         self._transition(GameState.WAITING_FOR_MATCH)
 
@@ -77,7 +86,7 @@ class GameStateMachine:
         if settings is None:
             return
         self._match_settings = settings
-        self._tracks = []
+        self._races = []
         logger.info(
             "Match detected — %s, %s, %s, %s, %d races, %s",
             settings.cc_class,
@@ -99,13 +108,15 @@ class GameStateMachine:
         if result is None:
             return
         track_name = result["track_name"]
-        self._tracks.append(track_name)
-        logger.info(
-            "Race %d/%d: %s",
-            len(self._tracks),
-            self._match_settings.race_count if self._match_settings else "?",
-            track_name,
-        )
+        players = tuple(self._player_reader.read_players(frame))
+
+        race = RaceInfo(track_name=track_name, players=players)
+        self._races.append(race)
+
+        total = self._match_settings.race_count if self._match_settings else "?"
+        logger.info("Race %d/%s: %s", len(self._races), total, track_name)
+        for p in players:
+            logger.info("  %s — %d pts", p.name, p.score)
 
     # -- transitions -------------------------------------------------------
 
