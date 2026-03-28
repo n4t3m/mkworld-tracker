@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import difflib
 import logging
-import os
-import shutil
 import time
 
 import cv2
@@ -13,12 +11,6 @@ import pytesseract
 from mktracker.detection.tracks import TRACK_NAMES
 
 logger = logging.getLogger(__name__)
-
-# Auto-detect Tesseract path on Windows if not already on PATH.
-if not shutil.which("tesseract"):
-    _WIN_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    if os.path.isfile(_WIN_TESSERACT):
-        pytesseract.pytesseract.tesseract_cmd = _WIN_TESSERACT
 
 # The left ~42% of the screen is the dark player-list panel.
 _LEFT_PANEL_RATIO = 0.42

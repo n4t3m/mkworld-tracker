@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from mktracker.capture.video_source import VideoCapture, enumerate_sources
-from mktracker.detection.track_select import TrackSelectDetector
+from mktracker.state_machine import GameStateMachine
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +36,8 @@ class MainWindow(QMainWindow):
         self._capture = VideoCapture()
         self._sources: list[dict] = []
 
-        self._track_detector = TrackSelectDetector()
+        self._state_machine = GameStateMachine()
         self._frame_count = 0
-        self._last_track_name: str | None = None
 
         self._build_ui()
         self._refresh_sources()
@@ -157,15 +156,7 @@ class MainWindow(QMainWindow):
         self._video_label.setPixmap(pixmap)
 
     def _run_detection(self, frame: np.ndarray) -> None:
-        result = self._track_detector.detect(frame)
-        track_name = result["track_name"] if result else None
-
-        if track_name != self._last_track_name:
-            if track_name is not None:
-                logger.info("Track selected: %s", track_name)
-            elif self._last_track_name is not None:
-                logger.info("Left track selection screen")
-            self._last_track_name = track_name
+        self._state_machine.update(frame)
 
     # ------------------------------------------------------------------
     # Cleanup
