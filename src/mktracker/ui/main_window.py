@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import cv2
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
@@ -17,8 +19,12 @@ from PySide6.QtWidgets import (
 )
 
 from mktracker.capture.video_source import VideoCapture, enumerate_sources
+from mktracker.detection.track_select import TrackSelectDetector
+
+logger = logging.getLogger(__name__)
 
 _FRAME_INTERVAL_MS = 33  # ~30 fps
+_DETECT_EVERY_N_FRAMES = 15  # run detection every ~500 ms
 
 
 class MainWindow(QMainWindow):
@@ -29,6 +35,10 @@ class MainWindow(QMainWindow):
 
         self._capture = VideoCapture()
         self._sources: list[dict] = []
+
+        self._track_detector = TrackSelectDetector()
+        self._frame_count = 0
+        self._last_track_name: str | None = None
 
         self._build_ui()
         self._refresh_sources()
@@ -127,6 +137,11 @@ class MainWindow(QMainWindow):
         if frame is None:
             return
 
+        # Run detection at a reduced rate to avoid OCR overhead every frame
+        self._frame_count += 1
+        if self._frame_count % _DETECT_EVERY_N_FRAMES == 0:
+            self._run_detection(frame)
+
         # Convert BGR -> RGB then to QImage
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
@@ -140,6 +155,17 @@ class MainWindow(QMainWindow):
             Qt.TransformationMode.SmoothTransformation,
         )
         self._video_label.setPixmap(pixmap)
+
+    def _run_detection(self, frame: np.ndarray) -> None:
+        result = self._track_detector.detect(frame)
+        track_name = result["track_name"] if result else None
+
+        if track_name != self._last_track_name:
+            if track_name is not None:
+                logger.info("Track selected: %s", track_name)
+            elif self._last_track_name is not None:
+                logger.info("Left track selection screen")
+            self._last_track_name = track_name
 
     # ------------------------------------------------------------------
     # Cleanup
