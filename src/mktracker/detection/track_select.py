@@ -96,6 +96,8 @@ class TrackSelectDetector:
         """Full pipeline: screen check, OCR, fuzzy match, and cooldown.
 
         Returns ``{"track_name": str}`` or ``None``.
+        The cooldown is managed externally by the state machine via
+        ``_last_match_time``.
         """
         if time.monotonic() - self._last_match_time < _COOLDOWN_SECONDS:
             return None
@@ -108,6 +110,4 @@ class TrackSelectDetector:
         if name is None:
             logger.debug("OCR text '%s' did not match any known track", raw)
             return None
-        logger.debug("Match confirmed, pausing detection for %.0fs", _COOLDOWN_SECONDS)
-        self._last_match_time = time.monotonic()
         return {"track_name": name}

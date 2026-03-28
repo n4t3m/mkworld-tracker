@@ -28,6 +28,7 @@ class GameState(Enum):
     WAITING_FOR_MATCH = auto()
     MATCH_STARTED = auto()
     RACING = auto()
+    READING_PLAYERS = auto()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -49,6 +50,7 @@ class GameStateMachine:
         self._match_settings: MatchSettings | None = None
         self._races: list[RaceInfo] = []
         self._match_dir: Path | None = None
+        self._pending_track: str | None = None
 
         self._match_detector = MatchSettingsDetector()
         self._track_detector = TrackSelectDetector()
@@ -74,6 +76,7 @@ class GameStateMachine:
         """Reset to WAITING_FOR_MATCH, clearing all match data."""
         self._match_settings = None
         self._races = []
+        self._pending_track = None
         self._track_detector._last_match_time = 0.0
         self._transition(GameState.WAITING_FOR_MATCH)
 
@@ -86,6 +89,8 @@ class GameStateMachine:
             self._handle_match_started()
         elif self._state is GameState.RACING:
             self._handle_racing(frame)
+        elif self._state is GameState.READING_PLAYERS:
+            self._handle_reading_players(frame)
 
     # -- state handlers ----------------------------------------------------
 
@@ -118,19 +123,29 @@ class GameStateMachine:
         result = self._track_detector.detect(frame)
         if result is None:
             return
-        track_name = result["track_name"]
+        self._pending_track = result["track_name"]
+        self._save_frame(frame, f"race_{len(self._races) + 1:02d}_{self._pending_track}_track")
+        logger.info("Track detected: %s — reading players on next frame", self._pending_track)
+        self._transition(GameState.READING_PLAYERS)
+
+    def _handle_reading_players(self, frame: np.ndarray) -> None:
         player_names = tuple(
             p.name for p in self._player_reader.read_players(frame)
         )
 
-        race = RaceInfo(track_name=track_name, players=player_names)
+        race = RaceInfo(track_name=self._pending_track, players=player_names)
         self._races.append(race)
-        self._save_frame(frame, f"race_{len(self._races):02d}_{track_name}")
+        self._save_frame(frame, f"race_{len(self._races):02d}_{self._pending_track}_players")
 
         total = self._match_settings.race_count if self._match_settings else "?"
-        logger.info("Race %d/%s: %s", len(self._races), total, track_name)
+        logger.info("Race %d/%s: %s", len(self._races), total, self._pending_track)
         for name in player_names:
             logger.info("  - %s", name)
+
+        self._pending_track = None
+        # Now apply the cooldown before looking for the next track.
+        self._track_detector._last_match_time = time.monotonic()
+        self._transition(GameState.RACING)
 
     # -- debug helpers -----------------------------------------------------
 
