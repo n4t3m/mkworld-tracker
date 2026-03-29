@@ -57,6 +57,7 @@ class GameStateMachine:
         self._pending_track: str | None = None
         self._result_accumulator = RaceResultAccumulator()
         self._stale_result_frames: int = 0
+        self._result_frame_buffer: list[np.ndarray] = []
 
         self._match_detector = MatchSettingsDetector()
         self._track_detector = TrackSelectDetector()
@@ -85,6 +86,7 @@ class GameStateMachine:
         self._races = []
         self._pending_track = None
         self._result_accumulator.clear()
+        self._result_frame_buffer.clear()
         self._stale_result_frames = 0
         self._track_detector._last_match_time = 0.0
         self._transition(GameState.WAITING_FOR_MATCH)
@@ -202,30 +204,27 @@ class GameStateMachine:
         self._transition(GameState.READING_RESULTS)
 
     def _handle_reading_results(self, frame: np.ndarray) -> None:
-        if not self._result_detector.is_active(frame):
-            self._save_result_frame(frame, "not_active_finalize")
-            self._finalize_results()
-            return
-        results = self._result_detector.read_results(frame)
-        self._save_result_frame(frame, f"reading_{results}")
-        prev_count = self._result_accumulator.placement_count
-        self._result_accumulator.add_frame(results)
-        new_count = self._result_accumulator.placement_count - prev_count
-        if new_count > 0:
+        # Just buffer frames cheaply — OCR happens in _finalize_results.
+        if self._result_detector.is_active(frame):
+            self._result_frame_buffer.append(frame)
             self._stale_result_frames = 0
-            self._save_frame(frame, f"race_{len(self._races):02d}_result_more")
-            logger.info(
-                "Read %d new placements (%d total)",
-                new_count,
-                self._result_accumulator.placement_count,
-            )
         else:
             self._stale_result_frames += 1
-            if self._stale_result_frames >= 5:
-                logger.info("No new placements for %d frames, finalizing", self._stale_result_frames)
+            if self._stale_result_frames >= 3:
+                logger.info(
+                    "Results screen ended, processing %d buffered frames",
+                    len(self._result_frame_buffer),
+                )
                 self._finalize_results()
 
     def _finalize_results(self) -> None:
+        # Batch-process all buffered frames now.
+        for i, buffered in enumerate(self._result_frame_buffer):
+            results = self._result_detector.read_results(buffered)
+            self._result_accumulator.add_frame(results)
+            self._save_result_frame(buffered, f"batch_{i:03d}_{len(results)}")
+        self._result_frame_buffer.clear()
+
         placements = self._result_accumulator.finalize()
         if placements:
             if self._races:

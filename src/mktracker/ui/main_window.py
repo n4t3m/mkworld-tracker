@@ -157,18 +157,21 @@ class MainWindow(QMainWindow):
 
         self._frame_count += 1
 
-        # During result reading, snapshot every 3rd frame for background OCR.
-        # Other states: run detection at the normal interval on the main thread.
-        reading_results = self._state_machine.state in (
-            GameState.RACE_ACTIVE,
-            GameState.READING_RESULTS,
-        )
+        state = self._state_machine.state
 
-        if reading_results:
+        if state is GameState.READING_RESULTS:
+            # Buffer frames cheaply on the main thread (no OCR yet).
+            # The state machine just stores the frame; OCR is batched later.
+            # When finalization triggers, it runs heavy OCR — use background.
             if self._frame_count % 3 == 0:
                 self._submit_background_detection(frame.copy())
-        elif self._frame_count % _DETECT_EVERY_N_FRAMES == 0:
-            self._run_detection(frame)
+        elif state is GameState.RACE_ACTIVE:
+            # Check for results screen start — fast is_active + one OCR.
+            if self._frame_count % 3 == 0:
+                self._submit_background_detection(frame.copy())
+        else:
+            if self._frame_count % _DETECT_EVERY_N_FRAMES == 0:
+                self._run_detection(frame)
 
         # Keep state label in sync (background thread may have changed state)
         self._update_state_label()
