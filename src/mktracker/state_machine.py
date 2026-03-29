@@ -14,6 +14,7 @@ import numpy as np
 from mktracker.detection.match_settings import MatchSettings, MatchSettingsDetector
 from mktracker.detection.player_reader import PlayerReader
 from mktracker.detection.race_finish import RaceFinishDetector
+from mktracker.detection.race_results import RaceResultDetector
 from mktracker.detection.track_select import TrackSelectDetector
 
 logger = logging.getLogger(__name__)
@@ -31,12 +32,14 @@ class GameState(Enum):
     WAITING_FOR_TRACK_PICK = auto()
     READING_PLAYERS_IN_RACE = auto()
     WAITING_FOR_RACE_END = auto()
+    READING_RACE_RESULTS = auto()
 
 
 @dataclasses.dataclass(frozen=True)
 class RaceInfo:
     track_name: str
     players: tuple[str, ...]
+    placements: tuple[tuple[int, str], ...] = ()
 
 
 class GameStateMachine:
@@ -58,6 +61,10 @@ class GameStateMachine:
         self._track_detector = TrackSelectDetector()
         self._player_reader = PlayerReader()
         self._finish_detector = RaceFinishDetector()
+        self._result_detector = RaceResultDetector()
+
+        self._race_placements: dict[int, str] = {}
+        self._seen_race_results = False
 
         logger.info("State: WAITING_FOR_MATCH")
 
@@ -80,6 +87,8 @@ class GameStateMachine:
         self._match_settings = None
         self._races = []
         self._pending_track = None
+        self._race_placements = {}
+        self._seen_race_results = False
         self._track_detector._last_match_time = 0.0
         self._transition(GameState.WAITING_FOR_MATCH)
 
@@ -88,7 +97,8 @@ class GameStateMachine:
         GameState.MATCH_STARTED: GameState.WAITING_FOR_TRACK_PICK,
         GameState.WAITING_FOR_TRACK_PICK: GameState.READING_PLAYERS_IN_RACE,
         GameState.READING_PLAYERS_IN_RACE: GameState.WAITING_FOR_RACE_END,
-        GameState.WAITING_FOR_RACE_END: GameState.WAITING_FOR_TRACK_PICK,
+        GameState.WAITING_FOR_RACE_END: GameState.READING_RACE_RESULTS,
+        GameState.READING_RACE_RESULTS: GameState.WAITING_FOR_TRACK_PICK,
     }
 
     def advance(self) -> None:
@@ -111,6 +121,8 @@ class GameStateMachine:
             self._handle_reading_players(frame)
         elif self._state is GameState.WAITING_FOR_RACE_END:
             self._handle_race_ending(frame)
+        elif self._state is GameState.READING_RACE_RESULTS:
+            self._handle_reading_results(frame)
 
     # -- state handlers ----------------------------------------------------
 
@@ -170,7 +182,65 @@ class GameStateMachine:
             return
         logger.info("Race finished — FINISH! detected")
         self._track_detector._last_match_time = time.monotonic()
-        self._transition(GameState.WAITING_FOR_TRACK_PICK)
+        self._race_placements = {}
+        self._seen_race_results = False
+        self._transition(GameState.READING_RACE_RESULTS)
+
+    def _handle_reading_results(self, frame: np.ndarray) -> None:
+        # Time-out after 30 seconds without seeing overall results.
+        elapsed = time.monotonic() - self._state_entered_at
+        if elapsed > 30.0:
+            logger.warning(
+                "Race results reading timed out after %.0fs", elapsed,
+            )
+            self._finalise_race_placements()
+            self._transition(GameState.WAITING_FOR_TRACK_PICK)
+            return
+
+        result = self._result_detector.detect(frame)
+        if result is None:
+            return
+
+        if result["type"] == "race":
+            self._seen_race_results = True
+            new_count = 0
+            for placement, name in result["results"]:
+                if placement and placement not in self._race_placements:
+                    self._race_placements[placement] = name
+                    new_count += 1
+            if new_count:
+                _debug_placement_dir = Path("debug_placements")
+                _debug_placement_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                path = _debug_placement_dir / f"{ts}_placements_{len(self._race_placements):02d}.png"
+                cv2.imwrite(str(path), frame)
+                logger.info("Saved placement frame: %s", path)
+            logger.debug(
+                "Race results so far: %d placements", len(self._race_placements),
+            )
+        elif result["type"] == "overall" and self._seen_race_results:
+            logger.info("Overall standings detected — race results complete")
+            self._finalise_race_placements()
+            self._transition(GameState.WAITING_FOR_TRACK_PICK)
+
+    def _finalise_race_placements(self) -> None:
+        """Log and store accumulated race placements."""
+        if not self._race_placements:
+            logger.info("No race placements captured")
+            return
+
+        logger.info("Race placements collected (%d):", len(self._race_placements))
+        for p in sorted(self._race_placements):
+            logger.info("  %2d. %s", p, self._race_placements[p])
+
+        # Update the most recent RaceInfo with placements.
+        if self._races:
+            old = self._races[-1]
+            self._races[-1] = RaceInfo(
+                track_name=old.track_name,
+                players=old.players,
+                placements=tuple(sorted(self._race_placements.items())),
+            )
 
     # -- debug helpers -----------------------------------------------------
 

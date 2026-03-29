@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from mktracker.capture.video_source import VideoCapture, enumerate_sources
-from mktracker.state_machine import GameStateMachine
+from mktracker.state_machine import GameState, GameStateMachine
 
 _CAPTURE_DIR = "captured_frames"
 
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 _FRAME_INTERVAL_MS = 33  # ~30 fps
 _DETECT_EVERY_N_FRAMES = 15  # run detection every ~500 ms
+_DETECT_FAST_N_FRAMES = 3   # faster sampling during race results reading
 
 
 class MainWindow(QMainWindow):
@@ -162,7 +163,12 @@ class MainWindow(QMainWindow):
         self._last_frame = frame
         self._frame_count += 1
 
-        if self._frame_count % _DETECT_EVERY_N_FRAMES == 0:
+        if self._state_machine.state is GameState.READING_RACE_RESULTS:
+            detect_interval = _DETECT_FAST_N_FRAMES
+        else:
+            detect_interval = _DETECT_EVERY_N_FRAMES
+
+        if self._frame_count % detect_interval == 0:
             self._state_machine.update(frame)
             self._update_state_label()
 
