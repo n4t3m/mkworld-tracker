@@ -23,6 +23,10 @@ env/
 # Debug
 debug_frames/
 
+# Test data provided externally (not tracked)
+testdata/
+captured_frames/
+
 # OS
 .DS_Store
 Thumbs.db

@@ -8,7 +8,7 @@ import pytest
 
 from mktracker.detection.race_finish import RaceFinishDetector
 
-_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "testdata", "race_finish")
+_DATA_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "race_finish")
 
 _detector = RaceFinishDetector()
 
