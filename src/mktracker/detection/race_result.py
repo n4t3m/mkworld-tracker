@@ -114,16 +114,27 @@ def _parse_results(text: str) -> dict[int, str]:
             continue
 
         m = re.search(
-            r"\b(\d{1,2})\b"           # placement number
-            r"[^A-Za-z]*"              # avatar/junk between number and name
+            r"(\d{1,2})(?!\d)"         # placement number (not followed by digit)
+            r".{0,20}?"                # avatar/junk (up to 20 chars, non-greedy)
             r"([A-Z][A-Za-z_.  ]+)",   # name starting with uppercase
             line,
         )
+        # Fallback: try lowercase-start names (e.g. "luigi")
+        if not m:
+            m = re.search(
+                r"(\d{1,2})(?!\d)"
+                r".{0,20}?"
+                r"([a-z][a-z]{3,})",   # lowercase name, min 4 chars
+                line,
+            )
         if not m:
             continue
 
         num = int(m.group(1))
         name = m.group(2).strip()
+        # Capitalize lowercase fallback names.
+        if name[0].islower():
+            name = name.capitalize()
 
         # Clean leading avatar junk (single uppercase + space).
         name = re.sub(r"^[A-Z]{1,2}\s+(?=[A-Z])", "", name)
