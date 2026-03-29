@@ -176,19 +176,25 @@ class GameStateMachine:
 
         self._transition(GameState.RACE_ACTIVE)
 
+    # Minimum placements in a single frame to confirm it's a real results screen.
+    _MIN_PLACEMENTS_TO_CONFIRM = 3
+
     def _handle_race_active(self, frame: np.ndarray) -> None:
         if not self._result_detector.is_active(frame):
             return
         results = self._result_detector.read_results(frame)
-        if not results:
-            self._save_frame(frame, f"race_{len(self._races):02d}_false_active")
-            self._save_result_frame(frame, "false_active")
-            logger.debug("is_active triggered but no placements found, ignoring")
+        if len(results) < self._MIN_PLACEMENTS_TO_CONFIRM:
+            self._save_result_frame(frame, f"below_threshold_{len(results)}")
+            logger.debug(
+                "is_active with %d placements (need %d), ignoring",
+                len(results),
+                self._MIN_PLACEMENTS_TO_CONFIRM,
+            )
             return
         self._result_accumulator.add_frame(results)
         self._stale_result_frames = 0
         self._save_frame(frame, f"race_{len(self._races):02d}_result")
-        self._save_result_frame(frame, f"result_{results}")
+        self._save_result_frame(frame, f"result_{len(results)}_placements")
         logger.info(
             "Race results detected (%d placements so far)",
             self._result_accumulator.placement_count,
