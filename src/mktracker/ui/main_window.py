@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 import cv2
 import numpy as np
@@ -38,6 +39,10 @@ class MainWindow(QMainWindow):
 
         self._state_machine = GameStateMachine()
         self._frame_count = 0
+
+        # Background detection thread state
+        self._detect_lock = threading.Lock()
+        self._detect_thread: threading.Thread | None = None
 
         self._build_ui()
         self._refresh_sources()
@@ -150,15 +155,23 @@ class MainWindow(QMainWindow):
         if frame is None:
             return
 
-        # Run detection — faster during result reading to catch all placements
         self._frame_count += 1
+
+        # During result reading, snapshot every 3rd frame for background OCR.
+        # Other states: run detection at the normal interval on the main thread.
         reading_results = self._state_machine.state in (
             GameState.RACE_ACTIVE,
             GameState.READING_RESULTS,
         )
-        interval = 3 if reading_results else _DETECT_EVERY_N_FRAMES
-        if self._frame_count % interval == 0:
+
+        if reading_results:
+            if self._frame_count % 3 == 0:
+                self._submit_background_detection(frame.copy())
+        elif self._frame_count % _DETECT_EVERY_N_FRAMES == 0:
             self._run_detection(frame)
+
+        # Keep state label in sync (background thread may have changed state)
+        self._update_state_label()
 
         # Convert BGR -> RGB then to QImage
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -178,6 +191,19 @@ class MainWindow(QMainWindow):
         self._state_machine.update(frame)
         self._update_state_label()
 
+    def _submit_background_detection(self, frame: np.ndarray) -> None:
+        """Queue a frame for background OCR processing."""
+        if self._detect_lock.locked():
+            # Previous OCR still running — skip this frame.
+            return
+
+        def _worker() -> None:
+            with self._detect_lock:
+                self._state_machine.update(frame)
+
+        self._detect_thread = threading.Thread(target=_worker, daemon=True)
+        self._detect_thread.start()
+
     def _update_state_label(self) -> None:
         self._state_label.setText(self._state_machine.state.name)
 
@@ -195,5 +221,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._timer.stop()
+        if self._detect_thread is not None:
+            self._detect_thread.join(timeout=2)
         self._capture.close()
         super().closeEvent(event)
