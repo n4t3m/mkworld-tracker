@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-import threading
+from datetime import datetime
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -20,7 +21,9 @@ from PySide6.QtWidgets import (
 )
 
 from mktracker.capture.video_source import VideoCapture, enumerate_sources
-from mktracker.state_machine import GameState, GameStateMachine
+from mktracker.state_machine import GameStateMachine
+
+_CAPTURE_DIR = "captured_frames"
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +42,7 @@ class MainWindow(QMainWindow):
 
         self._state_machine = GameStateMachine()
         self._frame_count = 0
-
-        # Background detection thread state
-        self._detect_lock = threading.Lock()
-        self._detect_thread: threading.Thread | None = None
+        self._last_frame: np.ndarray | None = None
 
         self._build_ui()
         self._refresh_sources()
@@ -92,6 +92,10 @@ class MainWindow(QMainWindow):
         reset_btn = QPushButton("Reset State")
         reset_btn.clicked.connect(self._on_reset)
         toolbar.addWidget(reset_btn)
+
+        capture_btn = QPushButton("Capture Frame")
+        capture_btn.clicked.connect(self._on_capture)
+        toolbar.addWidget(capture_btn)
 
         layout.addLayout(toolbar)
 
@@ -155,26 +159,12 @@ class MainWindow(QMainWindow):
         if frame is None:
             return
 
+        self._last_frame = frame
         self._frame_count += 1
 
-        state = self._state_machine.state
-
-        if state is GameState.READING_RESULTS:
-            # Buffer frames cheaply on the main thread (no OCR yet).
-            # The state machine just stores the frame; OCR is batched later.
-            # When finalization triggers, it runs heavy OCR — use background.
-            if self._frame_count % 3 == 0:
-                self._submit_background_detection(frame.copy())
-        elif state is GameState.RACE_ACTIVE:
-            # Check for results screen start — fast is_active + one OCR.
-            if self._frame_count % 3 == 0:
-                self._submit_background_detection(frame.copy())
-        else:
-            if self._frame_count % _DETECT_EVERY_N_FRAMES == 0:
-                self._run_detection(frame)
-
-        # Keep state label in sync (background thread may have changed state)
-        self._update_state_label()
+        if self._frame_count % _DETECT_EVERY_N_FRAMES == 0:
+            self._state_machine.update(frame)
+            self._update_state_label()
 
         # Convert BGR -> RGB then to QImage
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -190,23 +180,6 @@ class MainWindow(QMainWindow):
         )
         self._video_label.setPixmap(pixmap)
 
-    def _run_detection(self, frame: np.ndarray) -> None:
-        self._state_machine.update(frame)
-        self._update_state_label()
-
-    def _submit_background_detection(self, frame: np.ndarray) -> None:
-        """Queue a frame for background OCR processing."""
-        if self._detect_lock.locked():
-            # Previous OCR still running — skip this frame.
-            return
-
-        def _worker() -> None:
-            with self._detect_lock:
-                self._state_machine.update(frame)
-
-        self._detect_thread = threading.Thread(target=_worker, daemon=True)
-        self._detect_thread.start()
-
     def _update_state_label(self) -> None:
         self._state_label.setText(self._state_machine.state.name)
 
@@ -218,13 +191,22 @@ class MainWindow(QMainWindow):
         self._state_machine.reset()
         self._update_state_label()
 
+    def _on_capture(self) -> None:
+        if self._last_frame is None:
+            self.statusBar().showMessage("No frame to capture.")
+            return
+        out = Path(_CAPTURE_DIR)
+        out.mkdir(parents=True, exist_ok=True)
+        name = datetime.now().strftime("%Y%m%d_%H%M%S") + ".png"
+        path = out / name
+        cv2.imwrite(str(path), self._last_frame)
+        self.statusBar().showMessage(f"Saved {path}")
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
         self._timer.stop()
-        if self._detect_thread is not None:
-            self._detect_thread.join(timeout=2)
         self._capture.close()
         super().closeEvent(event)
