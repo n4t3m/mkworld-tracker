@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from mktracker.capture.video_source import VideoCapture, enumerate_sources
-from mktracker.state_machine import GameStateMachine
+from mktracker.state_machine import GameState, GameStateMachine
 
 logger = logging.getLogger(__name__)
 
@@ -150,9 +150,14 @@ class MainWindow(QMainWindow):
         if frame is None:
             return
 
-        # Run detection at a reduced rate to avoid OCR overhead every frame
+        # Run detection — faster during result reading to catch all placements
         self._frame_count += 1
-        if self._frame_count % _DETECT_EVERY_N_FRAMES == 0:
+        reading_results = self._state_machine.state in (
+            GameState.RACE_ACTIVE,
+            GameState.READING_RESULTS,
+        )
+        interval = 3 if reading_results else _DETECT_EVERY_N_FRAMES
+        if self._frame_count % interval == 0:
             self._run_detection(frame)
 
         # Convert BGR -> RGB then to QImage

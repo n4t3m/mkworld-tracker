@@ -25,8 +25,8 @@ _EDGE_PERCENT_MIN = 10.0
 # upscaled; larger ones are passed as-is.
 _OCR_TARGET_WIDTH = 1200
 
-# Minimum times a placement must be seen to be accepted (filters scroll noise).
-_MIN_CONSENSUS = 2
+# Minimum times a placement must be seen to be accepted.
+_MIN_CONSENSUS = 1
 
 
 class RaceResultDetector:
@@ -80,26 +80,26 @@ class RaceResultAccumulator:
     def finalize(self) -> dict[int, str]:
         """Return the consensus results, filtered and deduplicated."""
         # Pick the most-common reading per placement, requiring min count.
-        candidates: dict[int, str] = {}
+        candidates: dict[int, tuple[str, int]] = {}  # num -> (name, count)
         for num in sorted(self._readings):
             counts = Counter(self._readings[num])
             best_name, best_count = counts.most_common(1)[0]
             if best_count >= _MIN_CONSENSUS:
-                candidates[num] = best_name
+                candidates[num] = (best_name, best_count)
 
         # Deduplicate: if the same name appears at multiple placements,
-        # keep the one with the most total readings.
+        # keep the one with the highest consensus count for that name.
         name_to_nums: defaultdict[str, list[int]] = defaultdict(list)
-        for num, name in candidates.items():
+        for num, (name, _count) in candidates.items():
             name_to_nums[name].append(num)
         for name, nums in name_to_nums.items():
             if len(nums) > 1:
-                best_num = max(nums, key=lambda n: len(self._readings[n]))
+                best_num = max(nums, key=lambda n: candidates[n][1])
                 for n in nums:
                     if n != best_num:
                         del candidates[n]
 
-        return candidates
+        return {num: name for num, (name, _) in candidates.items()}
 
     def clear(self) -> None:
         self._readings.clear()
