@@ -182,11 +182,13 @@ class GameStateMachine:
         results = self._result_detector.read_results(frame)
         if not results:
             self._save_frame(frame, f"race_{len(self._races):02d}_false_active")
+            self._save_result_frame(frame, "false_active")
             logger.debug("is_active triggered but no placements found, ignoring")
             return
         self._result_accumulator.add_frame(results)
         self._stale_result_frames = 0
         self._save_frame(frame, f"race_{len(self._races):02d}_result")
+        self._save_result_frame(frame, f"result_{results}")
         logger.info(
             "Race results detected (%d placements so far)",
             self._result_accumulator.placement_count,
@@ -195,9 +197,11 @@ class GameStateMachine:
 
     def _handle_reading_results(self, frame: np.ndarray) -> None:
         if not self._result_detector.is_active(frame):
+            self._save_result_frame(frame, "not_active_finalize")
             self._finalize_results()
             return
         results = self._result_detector.read_results(frame)
+        self._save_result_frame(frame, f"reading_{results}")
         prev_count = self._result_accumulator.placement_count
         self._result_accumulator.add_frame(results)
         new_count = self._result_accumulator.placement_count - prev_count
@@ -241,6 +245,8 @@ class GameStateMachine:
 
     # -- debug helpers -----------------------------------------------------
 
+    _result_frame_counter: int = 0
+
     def _save_frame(self, frame: np.ndarray, label: str) -> None:
         if self._match_dir is None:
             return
@@ -248,6 +254,16 @@ class GameStateMachine:
         path = self._match_dir / f"{safe}.png"
         cv2.imwrite(str(path), frame)
         logger.debug("Saved debug frame: %s", path)
+
+    def _save_result_frame(self, frame: np.ndarray, label: str) -> None:
+        """Save a result frame to debug_frames/results/ (always available)."""
+        result_dir = _DEBUG_DIR / "results"
+        result_dir.mkdir(parents=True, exist_ok=True)
+        GameStateMachine._result_frame_counter += 1
+        safe = re.sub(r"[^\w\-]", "_", label)
+        path = result_dir / f"{GameStateMachine._result_frame_counter:04d}_{safe}.png"
+        cv2.imwrite(str(path), frame)
+        logger.debug("Saved result debug frame: %s", path)
 
     # -- transitions -------------------------------------------------------
 
