@@ -80,6 +80,10 @@ class MainWindow(QMainWindow):
         self._update_state_label()
         toolbar.addWidget(self._state_label)
 
+        advance_btn = QPushButton("Advance State")
+        advance_btn.clicked.connect(self._on_advance)
+        toolbar.addWidget(advance_btn)
+
         reset_btn = QPushButton("Reset State")
         reset_btn.clicked.connect(self._on_reset)
         toolbar.addWidget(reset_btn)
@@ -171,6 +175,10 @@ class MainWindow(QMainWindow):
 
     def _update_state_label(self) -> None:
         self._state_label.setText(self._state_machine.state.name)
+
+    def _on_advance(self) -> None:
+        self._state_machine.advance()
+        self._update_state_label()
 
     def _on_reset(self) -> None:
         self._state_machine.reset()
