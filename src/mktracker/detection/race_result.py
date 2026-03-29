@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter, defaultdict
 
 import cv2
 import numpy as np
@@ -10,8 +11,9 @@ import pytesseract
 logger = logging.getLogger(__name__)
 
 # Panel occupies the right portion of the screen.
-_PANEL_X1 = 0.35
-_PANEL_X2 = 0.95
+# Tuned for 1920x1080 capture output.
+_PANEL_X1 = 0.47
+_PANEL_X2 = 0.82
 _PANEL_Y1 = 0.04
 _PANEL_Y2 = 0.96
 
@@ -21,7 +23,10 @@ _EDGE_PERCENT_MIN = 10.0
 
 # Target panel width for OCR (in pixels). Panels smaller than this get
 # upscaled; larger ones are passed as-is.
-_OCR_TARGET_WIDTH = 1800
+_OCR_TARGET_WIDTH = 1200
+
+# Minimum times a placement must be seen to be accepted (filters scroll noise).
+_MIN_CONSENSUS = 2
 
 
 class RaceResultDetector:
@@ -39,10 +44,6 @@ class RaceResultDetector:
         strong_pct = np.sum(row_edge > _EDGE_ROW_THRESHOLD) / len(row_edge) * 100
         return strong_pct > _EDGE_PERCENT_MIN
 
-    def is_race_result(self, text: str) -> bool:
-        """Check if OCR text contains '+N' deltas (race result, not standings)."""
-        return bool(re.search(r"\+\d{1,2}\s+\d", text))
-
     def read_results(self, frame: np.ndarray) -> dict[int, str]:
         """OCR the results panel. Returns {placement: name}, possibly empty."""
         h, w = frame.shape[:2]
@@ -50,7 +51,6 @@ class RaceResultDetector:
             int(h * _PANEL_Y1) : int(h * _PANEL_Y2),
             int(w * _PANEL_X1) : int(w * _PANEL_X2),
         ]
-        # Scale to a consistent size so OCR works at any capture resolution.
         pw = panel.shape[1]
         if pw < _OCR_TARGET_WIDTH:
             scale = _OCR_TARGET_WIDTH / pw
@@ -61,6 +61,50 @@ class RaceResultDetector:
         return _parse_results(text)
 
 
+class RaceResultAccumulator:
+    """Accumulates placement readings across multiple frames and resolves
+    the best name per placement via consensus voting."""
+
+    def __init__(self) -> None:
+        self._readings: defaultdict[int, list[str]] = defaultdict(list)
+
+    def add_frame(self, results: dict[int, str]) -> None:
+        for num, name in results.items():
+            self._readings[num].append(name)
+
+    @property
+    def placement_count(self) -> int:
+        """Number of unique placements seen (before consensus filtering)."""
+        return len(self._readings)
+
+    def finalize(self) -> dict[int, str]:
+        """Return the consensus results, filtered and deduplicated."""
+        # Pick the most-common reading per placement, requiring min count.
+        candidates: dict[int, str] = {}
+        for num in sorted(self._readings):
+            counts = Counter(self._readings[num])
+            best_name, best_count = counts.most_common(1)[0]
+            if best_count >= _MIN_CONSENSUS:
+                candidates[num] = best_name
+
+        # Deduplicate: if the same name appears at multiple placements,
+        # keep the one with the most total readings.
+        name_to_nums: defaultdict[str, list[int]] = defaultdict(list)
+        for num, name in candidates.items():
+            name_to_nums[name].append(num)
+        for name, nums in name_to_nums.items():
+            if len(nums) > 1:
+                best_num = max(nums, key=lambda n: len(self._readings[n]))
+                for n in nums:
+                    if n != best_num:
+                        del candidates[n]
+
+        return candidates
+
+    def clear(self) -> None:
+        self._readings.clear()
+
+
 def _parse_results(text: str) -> dict[int, str]:
     """Extract {placement: name} pairs from raw OCR text."""
     results: dict[int, str] = {}
@@ -69,8 +113,6 @@ def _parse_results(text: str) -> dict[int, str]:
         if not line:
             continue
 
-        # Strategy: find a 1-2 digit placement number, then the player name.
-        # The name is the longest capitalized-word sequence after the number.
         m = re.search(
             r"\b(\d{1,2})\b"           # placement number
             r"[^A-Za-z]*"              # avatar/junk between number and name
@@ -90,7 +132,8 @@ def _parse_results(text: str) -> dict[int, str]:
         name = re.sub(r"(\s+[a-z]{1,3})+\s*$", "", name)
         name = re.sub(r"\s+\S$", "", name)
         name = name.rstrip(".")
-        if len(name) < 2 or num < 1 or num > 24:
+
+        if len(name) < 4 or num < 1 or num > 24:
             continue
         if num not in results:
             results[num] = name

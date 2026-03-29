@@ -13,7 +13,7 @@ import numpy as np
 
 from mktracker.detection.match_settings import MatchSettings, MatchSettingsDetector
 from mktracker.detection.player_reader import PlayerReader
-from mktracker.detection.race_result import RaceResultDetector
+from mktracker.detection.race_result import RaceResultAccumulator, RaceResultDetector
 from mktracker.detection.track_select import TrackSelectDetector
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ class GameStateMachine:
         self._races: list[RaceInfo] = []
         self._match_dir: Path | None = None
         self._pending_track: str | None = None
-        self._accumulated_placements: dict[int, str] = {}
+        self._result_accumulator = RaceResultAccumulator()
         self._stale_result_frames: int = 0
 
         self._match_detector = MatchSettingsDetector()
@@ -84,7 +84,7 @@ class GameStateMachine:
         self._match_settings = None
         self._races = []
         self._pending_track = None
-        self._accumulated_placements = {}
+        self._result_accumulator.clear()
         self._stale_result_frames = 0
         self._track_detector._last_match_time = 0.0
         self._transition(GameState.WAITING_FOR_MATCH)
@@ -181,67 +181,59 @@ class GameStateMachine:
             return
         results = self._result_detector.read_results(frame)
         if not results:
-            # is_active triggered but no placements parsed — false positive.
             self._save_frame(frame, f"race_{len(self._races):02d}_false_active")
             logger.debug("is_active triggered but no placements found, ignoring")
             return
-        self._accumulated_placements.update(results)
+        self._result_accumulator.add_frame(results)
         self._stale_result_frames = 0
         self._save_frame(frame, f"race_{len(self._races):02d}_result")
         logger.info(
             "Race results detected (%d placements so far)",
-            len(self._accumulated_placements),
+            self._result_accumulator.placement_count,
         )
         self._transition(GameState.READING_RESULTS)
 
     def _handle_reading_results(self, frame: np.ndarray) -> None:
         if not self._result_detector.is_active(frame):
-            # Results screen gone — finalize what we have.
             self._finalize_results()
             return
         results = self._result_detector.read_results(frame)
-        new_count = 0
-        for num, name in results.items():
-            if num not in self._accumulated_placements:
-                self._accumulated_placements[num] = name
-                new_count += 1
+        prev_count = self._result_accumulator.placement_count
+        self._result_accumulator.add_frame(results)
+        new_count = self._result_accumulator.placement_count - prev_count
         if new_count > 0:
             self._stale_result_frames = 0
             self._save_frame(frame, f"race_{len(self._races):02d}_result_more")
             logger.info(
                 "Read %d new placements (%d total)",
                 new_count,
-                len(self._accumulated_placements),
+                self._result_accumulator.placement_count,
             )
         else:
             self._stale_result_frames += 1
-            # No new placements for several checks — likely transitioned to
-            # overall standings or results are fully read.
             if self._stale_result_frames >= 5:
                 logger.info("No new placements for %d frames, finalizing", self._stale_result_frames)
                 self._finalize_results()
 
     def _finalize_results(self) -> None:
-        if self._accumulated_placements:
-            # Attach placements to the most recent race if one exists.
+        placements = self._result_accumulator.finalize()
+        if placements:
             if self._races:
                 last = self._races[-1]
                 self._races[-1] = RaceInfo(
                     track_name=last.track_name,
                     players=last.players,
-                    placements=dict(self._accumulated_placements),
+                    placements=placements,
                 )
             race_label = self._races[-1].track_name if self._races else "unknown"
             logger.info(
                 "Final race results for %s (%d placements):",
                 race_label,
-                len(self._accumulated_placements),
+                len(placements),
             )
-            for num in sorted(self._accumulated_placements):
-                logger.info(
-                    "  %2d: %s", num, self._accumulated_placements[num]
-                )
-        self._accumulated_placements = {}
+            for num in sorted(placements):
+                logger.info("  %2d: %s", num, placements[num])
+        self._result_accumulator.clear()
         self._stale_result_frames = 0
         self._pending_track = None
         self._track_detector._last_match_time = time.monotonic()
