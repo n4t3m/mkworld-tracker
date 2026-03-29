@@ -13,13 +13,14 @@ A Python app that watches a capture card's video feed of Mario Kart and automati
 ```
 src/mktracker/
 ├── main.py                      # Entry point, logging setup (INFO level), QApplication
-├── state_machine.py             # GameStateMachine with 4 states, debug frame saving
+├── state_machine.py             # GameStateMachine with 5 states, debug frame saving
 ├── capture/
 │   └── video_source.py          # Camera enumeration (DirectShow) + VideoCapture wrapper
 ├── detection/
 │   ├── __init__.py              # Shared Tesseract path auto-detection
 │   ├── match_settings.py        # MatchSettingsDetector + MatchSettings dataclass
 │   ├── player_reader.py         # PlayerReader: dynamic grid detection + per-cell OCR
+│   ├── race_finish.py           # RaceFinishDetector (FINISH! banner via HSV color detection)
 │   ├── track_select.py          # TrackSelectDetector (screen detection + OCR + fuzzy match)
 │   └── tracks.py                # Canonical tuple of 30 track names
 └── ui/
@@ -39,12 +40,14 @@ src/mktracker/
 1. **WAITING_FOR_MATCH** — polls `MatchSettingsDetector` for the "rules decided" screen
 2. **MATCH_STARTED** — stores settings, waits 5 seconds, transitions to RACING
 3. **RACING** — polls `TrackSelectDetector` (15s cooldown); on track detection, transitions to READING_PLAYERS
-4. **READING_PLAYERS** — reads player names on the next frame (gives the player list time to load), transitions back to RACING
+4. **READING_PLAYERS** — reads player names on the next frame (gives the player list time to load), transitions to RACE_ENDING
+5. **RACE_ENDING** — polls `RaceFinishDetector` for the FINISH! banner, transitions back to RACING
 
 ## Detection Patterns
 - **Track selection screen**: left 42% of frame is very dark (player list panel), right side is colorful map. Track name OCR'd from tight banner ROI at y=33-37%, x=52-85%, upscaled 3x. Fuzzy-matched against 30 canonical track names (difflib, cutoff 0.6).
 - **Match settings screen**: bright white card in center (mean brightness >150), bottom banner at y=94-98% contains "The rules have been decided!", settings parsed from whole card OCR at y=34-86%. Each setting fuzzy-matched against known valid values.
 - **Player names**: left panel 2-column grid. Rows detected via horizontal brightness bands (merged if gap < 6px, filtered if height < 40px). Column split from brightness profile dip. Each cell: skip 17% for avatar, OTSU threshold, `--psm 7` OCR. Names cleaned of leading avatar noise and trailing artefacts.
+- **Race finish screen**: FINISH! banner detected via HSV masking for orange-yellow text (H 15-35, S>150, V>180) in center ROI (x=15-82%, y=33-58%). Validated by pixel ratio bounds (0.20-0.35) and requiring orange in all 5 vertical strips (rejects GO! text and partial animations).
 
 ## Debug Frame Saving
 - Each match creates a timestamped folder under `debug_frames/` (gitignored)
@@ -59,6 +62,7 @@ src/mktracker/
 - `testdata/track_names.txt` — reference list of 30 tracks (canonical list lives in `tracks.py`)
 - `testdata/samplerace.mp4` — full race at 2560x1440
 - `testdata/realsamplerace.mp4` — full race at 1920x1080 (real capture card output)
+- `testdata/race_finish/` — 1 FINISH! screenshot + 4 negative frames (GO!, partial animation, track select, results)
 
 ## Conventions
 - All game logic lives in `state_machine.py` and `detection/` — the UI just renders and forwards frames

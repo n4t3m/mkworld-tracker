@@ -13,6 +13,7 @@ import numpy as np
 
 from mktracker.detection.match_settings import MatchSettings, MatchSettingsDetector
 from mktracker.detection.player_reader import PlayerReader
+from mktracker.detection.race_finish import RaceFinishDetector
 from mktracker.detection.track_select import TrackSelectDetector
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ class GameState(Enum):
     MATCH_STARTED = auto()
     RACING = auto()
     READING_PLAYERS = auto()
+    RACE_ENDING = auto()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -55,6 +57,7 @@ class GameStateMachine:
         self._match_detector = MatchSettingsDetector()
         self._track_detector = TrackSelectDetector()
         self._player_reader = PlayerReader()
+        self._finish_detector = RaceFinishDetector()
 
         logger.info("State: WAITING_FOR_MATCH")
 
@@ -84,7 +87,8 @@ class GameStateMachine:
         GameState.WAITING_FOR_MATCH: GameState.MATCH_STARTED,
         GameState.MATCH_STARTED: GameState.RACING,
         GameState.RACING: GameState.READING_PLAYERS,
-        GameState.READING_PLAYERS: GameState.RACING,
+        GameState.READING_PLAYERS: GameState.RACE_ENDING,
+        GameState.RACE_ENDING: GameState.RACING,
     }
 
     def advance(self) -> None:
@@ -105,6 +109,8 @@ class GameStateMachine:
             self._handle_racing(frame)
         elif self._state is GameState.READING_PLAYERS:
             self._handle_reading_players(frame)
+        elif self._state is GameState.RACE_ENDING:
+            self._handle_race_ending(frame)
 
     # -- state handlers ----------------------------------------------------
 
@@ -157,6 +163,12 @@ class GameStateMachine:
             logger.info("  - %s", name)
 
         self._pending_track = None
+        self._transition(GameState.RACE_ENDING)
+
+    def _handle_race_ending(self, frame: np.ndarray) -> None:
+        if not self._finish_detector.is_active(frame):
+            return
+        logger.info("Race finished — FINISH! detected")
         self._track_detector._last_match_time = time.monotonic()
         self._transition(GameState.RACING)
 
