@@ -39,9 +39,9 @@ src/mktracker/
 ## State Machine Flow
 1. **WAITING_FOR_MATCH** — polls `MatchSettingsDetector` for the "rules decided" screen
 2. **MATCH_STARTED** — stores settings, waits 5 seconds, transitions to RACING
-3. **RACING** — polls `TrackSelectDetector` (15s cooldown); on track detection, transitions to READING_PLAYERS
-4. **READING_PLAYERS** — reads player names on the next frame (gives the player list time to load), transitions to RACE_ENDING
-5. **RACE_ENDING** — polls `RaceFinishDetector` for the FINISH! banner, transitions back to RACING
+3. **WAITING_FOR_TRACK_PICK** — polls `TrackSelectDetector` (15s cooldown); on track detection, transitions to READING_PLAYERS_IN_RACE
+4. **READING_PLAYERS_IN_RACE** — reads player names on the next frame (gives the player list time to load), transitions to WAITING_FOR_RACE_END
+5. **WAITING_FOR_RACE_END** — polls `RaceFinishDetector` for the FINISH! banner, transitions back to WAITING_FOR_TRACK_PICK
 
 ## Detection Patterns
 - **Track selection screen**: left 42% of frame is very dark (player list panel), right side is colorful map. Track name OCR'd from tight banner ROI at y=33-37%, x=52-85%, upscaled 3x. Fuzzy-matched against 30 canonical track names (difflib, cutoff 0.6).

@@ -28,9 +28,9 @@ _DEBUG_DIR = Path("debug_frames")
 class GameState(Enum):
     WAITING_FOR_MATCH = auto()
     MATCH_STARTED = auto()
-    RACING = auto()
-    READING_PLAYERS = auto()
-    RACE_ENDING = auto()
+    WAITING_FOR_TRACK_PICK = auto()
+    READING_PLAYERS_IN_RACE = auto()
+    WAITING_FOR_RACE_END = auto()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -85,10 +85,10 @@ class GameStateMachine:
 
     _ADVANCE_ORDER = {
         GameState.WAITING_FOR_MATCH: GameState.MATCH_STARTED,
-        GameState.MATCH_STARTED: GameState.RACING,
-        GameState.RACING: GameState.READING_PLAYERS,
-        GameState.READING_PLAYERS: GameState.RACE_ENDING,
-        GameState.RACE_ENDING: GameState.RACING,
+        GameState.MATCH_STARTED: GameState.WAITING_FOR_TRACK_PICK,
+        GameState.WAITING_FOR_TRACK_PICK: GameState.READING_PLAYERS_IN_RACE,
+        GameState.READING_PLAYERS_IN_RACE: GameState.WAITING_FOR_RACE_END,
+        GameState.WAITING_FOR_RACE_END: GameState.WAITING_FOR_TRACK_PICK,
     }
 
     def advance(self) -> None:
@@ -105,11 +105,11 @@ class GameStateMachine:
             self._handle_waiting(frame)
         elif self._state is GameState.MATCH_STARTED:
             self._handle_match_started()
-        elif self._state is GameState.RACING:
+        elif self._state is GameState.WAITING_FOR_TRACK_PICK:
             self._handle_racing(frame)
-        elif self._state is GameState.READING_PLAYERS:
+        elif self._state is GameState.READING_PLAYERS_IN_RACE:
             self._handle_reading_players(frame)
-        elif self._state is GameState.RACE_ENDING:
+        elif self._state is GameState.WAITING_FOR_RACE_END:
             self._handle_race_ending(frame)
 
     # -- state handlers ----------------------------------------------------
@@ -137,7 +137,7 @@ class GameStateMachine:
     def _handle_match_started(self) -> None:
         elapsed = time.monotonic() - self._state_entered_at
         if elapsed >= _MATCH_START_DELAY:
-            self._transition(GameState.RACING)
+            self._transition(GameState.WAITING_FOR_TRACK_PICK)
 
     def _handle_racing(self, frame: np.ndarray) -> None:
         result = self._track_detector.detect(frame)
@@ -146,7 +146,7 @@ class GameStateMachine:
         self._pending_track = result["track_name"]
         self._save_frame(frame, f"race_{len(self._races) + 1:02d}_{self._pending_track}_track")
         logger.info("Track detected: %s — reading players on next frame", self._pending_track)
-        self._transition(GameState.READING_PLAYERS)
+        self._transition(GameState.READING_PLAYERS_IN_RACE)
 
     def _handle_reading_players(self, frame: np.ndarray) -> None:
         player_names = tuple(
@@ -163,14 +163,14 @@ class GameStateMachine:
             logger.info("  - %s", name)
 
         self._pending_track = None
-        self._transition(GameState.RACE_ENDING)
+        self._transition(GameState.WAITING_FOR_RACE_END)
 
     def _handle_race_ending(self, frame: np.ndarray) -> None:
         if not self._finish_detector.is_active(frame):
             return
         logger.info("Race finished — FINISH! detected")
         self._track_detector._last_match_time = time.monotonic()
-        self._transition(GameState.RACING)
+        self._transition(GameState.WAITING_FOR_TRACK_PICK)
 
     # -- debug helpers -----------------------------------------------------
 
