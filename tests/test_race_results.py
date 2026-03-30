@@ -50,6 +50,49 @@ _DAN_EXPECTED = {
     12: "ProTime",
 }
 
+# ---- KTB race fixtures (first-place name "bló TDB") ----
+_KTB_DIR = os.path.join(
+    os.path.dirname(__file__), "fixtures", "race_results_ktb",
+)
+_KTB_FRAMES = [
+    "frame_03.png",   # rows 6-12 visible
+    "frame_09.png",   # rows 1-12 visible (race results, +N)
+    "frame_11a.png",  # rows 1-12 visible (race results, +N)
+    "frame_11b.png",  # rows 1-12 visible (overall standings)
+]
+_KTB_EXPECTED = {
+    1: "TDB",
+    2: "Aho",
+    3: "ProTime",
+    6: "Spritz",
+    7: "Beef Boss",
+    8: "mogiSRY",
+    11: "Yae",
+    12: "KT viti",
+}
+
+# ---- DDJ race fixtures (Dino Dino Jungle — busy background with signs) ----
+_DDJ_DIR = os.path.join(
+    os.path.dirname(__file__), "fixtures", "race_results_ddj",
+)
+_DDJ_FRAMES = [
+    "frame_06.png",   # rows 8-12 visible (scrolled, noisy game signs)
+    "frame_12a.png",  # rows 1-12 visible (race results, +N)
+    "frame_12b.png",  # rows 1-12 visible (race results, +N)
+    "frame_13.png",   # rows 1-12 visible (overall standings)
+]
+_DDJ_EXPECTED = {
+    1: "aya",
+    2: "Beef Boss",
+    3: "Spritz",
+    6: "TDB",
+    7: "KT",
+    8: "Yae",
+    9: "Aho",
+    11: "B",
+    12: "mogiSRY",
+}
+
 
 @pytest.fixture(scope="module")
 def detector():
@@ -75,6 +118,16 @@ def pb_frames():
 @pytest.fixture(scope="module")
 def dan_frames():
     return _load_frames(_DAN_DIR, _DAN_FRAMES)
+
+
+@pytest.fixture(scope="module")
+def ktb_frames():
+    return _load_frames(_KTB_DIR, _KTB_FRAMES)
+
+
+@pytest.fixture(scope="module")
+def ddj_frames():
+    return _load_frames(_DDJ_DIR, _DDJ_FRAMES)
 
 
 def _accumulate(detector: RaceResultDetector, frames):
@@ -181,6 +234,75 @@ class TestDandelionAccumulation:
         assert len(self.placements) >= 12
 
     @pytest.mark.parametrize("placement,expected", list(_DAN_EXPECTED.items()))
+    def test_expected_name(self, placement, expected):
+        actual = self.placements.get(placement, "")
+        assert expected.lower() in actual.lower(), (
+            f"placement {placement}: expected '{expected}' "
+            f"in '{actual}'"
+        )
+
+
+# ------------------------------------------------------------------
+# KTB race tests
+# ------------------------------------------------------------------
+
+
+class TestKTBAccumulation:
+    """End-to-end accumulation for the KTB race (first-place 'bló TDB')."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _accumulated(self, detector, ktb_frames, request):
+        request.cls.placements = _accumulate(detector, ktb_frames)
+
+    def test_first_place_detected(self):
+        assert 1 in self.placements, "first place must not be missing"
+
+    def test_placements_start_at_one(self):
+        assert min(self.placements) == 1
+
+    def test_no_placement_exceeds_twelve(self):
+        assert max(self.placements) <= 12
+
+    def test_all_twelve_placements(self):
+        assert len(self.placements) >= 12
+
+    @pytest.mark.parametrize("placement,expected", list(_KTB_EXPECTED.items()))
+    def test_expected_name(self, placement, expected):
+        actual = self.placements.get(placement, "")
+        assert expected.lower() in actual.lower(), (
+            f"placement {placement}: expected '{expected}' "
+            f"in '{actual}'"
+        )
+
+
+# ------------------------------------------------------------------
+# DDJ race tests (Dino Dino Jungle — noisy background with game signs)
+# ------------------------------------------------------------------
+
+
+class TestDDJAccumulation:
+    """End-to-end accumulation for the DDJ race (first-place 'A★aya').
+
+    This track has prominent game-world signs (SHY GUY, CHAIN CHOMP) that
+    produce spurious OCR rows below the result bars in scrolled frames.
+    Placements 1-12 should still be correct; extra noise placements above
+    12 are tolerated.
+    """
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _accumulated(self, detector, ddj_frames, request):
+        request.cls.placements = _accumulate(detector, ddj_frames)
+
+    def test_first_place_detected(self):
+        assert 1 in self.placements, "first place must not be missing"
+
+    def test_placements_start_at_one(self):
+        assert min(self.placements) == 1
+
+    def test_all_twelve_placements(self):
+        assert len([p for p in self.placements if p <= 12]) >= 12
+
+    @pytest.mark.parametrize("placement,expected", list(_DDJ_EXPECTED.items()))
     def test_expected_name(self, placement, expected):
         actual = self.placements.get(placement, "")
         assert expected.lower() in actual.lower(), (

@@ -214,9 +214,10 @@ class RaceResultDetector:
         frame_h: int = 0,
     ) -> list[dict]:
         words = []
-        # Result bars never appear in the topmost rows of the frame;
-        # anything there is background / sky noise.
+        # Result bars never appear in the topmost or bottommost rows;
+        # anything there is sky noise or game-world text (signs, HUD).
         min_y = frame_h * 0.02
+        max_y = frame_h * 0.92
         for i in range(len(data["text"])):
             text = data["text"][i].strip()
             conf = int(data["conf"][i])
@@ -225,7 +226,8 @@ class RaceResultDetector:
             ox = data["left"][i] // 2 + x_offset
             oy = data["top"][i] // 2
             oh = data["height"][i] // 2
-            if oy + oh // 2 < min_y:
+            y_mid = oy + oh // 2
+            if y_mid < min_y or y_mid > max_y:
                 continue
             ow = data["width"][i] // 2
             # Use the horizontal centre for zone classification so that
