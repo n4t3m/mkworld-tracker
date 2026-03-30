@@ -78,6 +78,10 @@ class GameStateMachine:
     def match_settings(self) -> MatchSettings | None:
         return self._match_settings
 
+    @match_settings.setter
+    def match_settings(self, value: MatchSettings | None) -> None:
+        self._match_settings = value
+
     @property
     def races(self) -> list[RaceInfo]:
         return list(self._races)
@@ -197,7 +201,11 @@ class GameStateMachine:
             self._transition(GameState.WAITING_FOR_TRACK_PICK)
             return
 
-        result = self._result_detector.detect(frame)
+        use_teams = (
+            self._match_settings is not None
+            and self._match_settings.teams != "No Teams"
+        )
+        result = self._result_detector.detect(frame, teams=use_teams)
         if result is None:
             return
 

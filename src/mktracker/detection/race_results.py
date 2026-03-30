@@ -4,6 +4,16 @@ After a race ends, the game displays each player's placement with a ``+N``
 point differential.  When the ``+`` disappears the view transitions to
 overall standings.  This module detects which phase is shown and reads
 placement numbers and player names from the race-result rows.
+
+Two preprocessing paths are supported:
+
+* **No-teams mode** — grey semi-transparent bars with white text.  A hybrid
+  threshold ``(grayscale > 170) & (blue > 100)`` isolates the text while
+  filtering the gold first-place bar.
+
+* **Teams mode** — red / blue opaque bars where the text takes on the bar
+  colour.  A Gaussian-blur + Otsu on the HSV *V* channel is used for names,
+  and an adaptive-threshold cluster check on a narrow strip detects ``+``.
 """
 
 from __future__ import annotations
@@ -31,12 +41,30 @@ _SCORE_X_MIN = 0.82      # +N differentials and totals are right of here
 # Minimum detected name-rows to consider the frame as showing overall results.
 _MIN_ROWS_FOR_OVERALL = 5
 
+# Plus-column strip for team-mode cluster detection.
+_PLUS_STRIP_X1 = 0.84
+_PLUS_STRIP_X2 = 0.90
+_PLUS_MIN_CLUSTERS = 3
+
 
 class RaceResultDetector:
     """Detects race-result rows and reads placement / name data."""
 
-    def detect(self, frame: np.ndarray) -> dict | None:
+    def detect(
+        self,
+        frame: np.ndarray,
+        *,
+        teams: bool = False,
+    ) -> dict | None:
         """Analyse *frame* for race results.
+
+        Parameters
+        ----------
+        frame:
+            BGR video frame.
+        teams:
+            When ``True`` use the team-colour preprocessing path
+            (red/blue bars instead of grey).
 
         Returns
         -------
@@ -52,15 +80,15 @@ class RaceResultDetector:
         h, w = frame.shape[:2]
         x1 = int(w * _ROI_X1)
         x2 = int(w * _ROI_X2)
-
         roi = frame[:, x1:x2]
 
-        # Hybrid threshold: require both grayscale > 170 (catches all white
-        # text) AND blue channel > 100 (rejects the gold first-place bar
-        # background which is bright in grayscale but has very low blue).
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        blue = roi[:, :, 0]  # OpenCV is BGR
-        binary = ((gray > 170) & (blue > 100)).astype(np.uint8) * 255
+        if teams:
+            binary = self._binarise_teams(roi)
+            has_plus = self._has_plus_clusters(frame)
+        else:
+            binary = self._binarise_default(roi)
+            has_plus = None  # determined from OCR below
+
         ocr_input = cv2.resize(binary, None, fx=2, fy=2,
                                interpolation=cv2.INTER_CUBIC)
 
@@ -72,17 +100,20 @@ class RaceResultDetector:
         words = self._extract_words(data, x1, w)
         rows = self._group_into_rows(words)
 
-        has_plus = False
         parsed_rows: list[tuple[int, int | None, str]] = []
 
         for row_words in rows:
             y_center, placement, name, row_has_plus = self._parse_row(
                 row_words,
             )
-            if row_has_plus:
+            # In default mode, derive has_plus from the OCR output.
+            if has_plus is None and row_has_plus:
                 has_plus = True
             if name:
                 parsed_rows.append((y_center, placement, name))
+
+        if has_plus is None:
+            has_plus = False
 
         if not parsed_rows:
             return None
@@ -98,7 +129,63 @@ class RaceResultDetector:
         return None
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Binarisation strategies
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _binarise_default(roi: np.ndarray) -> np.ndarray:
+        """Hybrid threshold for grey / gold bars (no-teams mode)."""
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        blue = roi[:, :, 0]
+        return ((gray > 170) & (blue > 100)).astype(np.uint8) * 255
+
+    @staticmethod
+    def _binarise_teams(roi: np.ndarray) -> np.ndarray:
+        """Blur + Otsu on V channel for coloured team bars."""
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        v = hsv[:, :, 2]
+        v_blur = cv2.GaussianBlur(v, (5, 5), 0)
+        _, binary = cv2.threshold(
+            v_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+        )
+        return binary
+
+    @staticmethod
+    def _has_plus_clusters(frame: np.ndarray) -> bool:
+        """Detect ``+N`` text in the plus column via adaptive-V clusters.
+
+        Works for both team and non-team frames.  The ``+`` column is a
+        narrow vertical strip; each ``+N`` creates a bright cluster in
+        the adaptive-threshold output.  Three or more clusters indicate
+        race results.
+        """
+        h, w = frame.shape[:2]
+        strip = frame[:, int(w * _PLUS_STRIP_X1):int(w * _PLUS_STRIP_X2)]
+        v = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)[:, :, 2]
+        binary = cv2.adaptiveThreshold(
+            v, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 31, -15,
+        )
+        bright_per_row = binary.mean(axis=1)
+
+        clusters = 0
+        in_cluster = False
+        cluster_start = 0
+        for y in range(h):
+            if bright_per_row[y] > 30 and not in_cluster:
+                cluster_start = y
+                in_cluster = True
+            elif bright_per_row[y] <= 30 and in_cluster:
+                if y - cluster_start >= 8:
+                    clusters += 1
+                in_cluster = False
+        if in_cluster and h - cluster_start >= 8:
+            clusters += 1
+
+        return clusters >= _PLUS_MIN_CLUSTERS
+
+    # ------------------------------------------------------------------
+    # Word extraction and row parsing
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -185,6 +272,10 @@ class RaceResultDetector:
         name = " ".join(name_parts) if name_parts else None
         return y_center, placement, name, has_plus
 
+    # ------------------------------------------------------------------
+    # Placement correction
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _fix_placements(
         parsed_rows: list[tuple[int, int | None, str]],
@@ -205,15 +296,12 @@ class RaceResultDetector:
         gaps = [
             parsed_rows[i + 1][0] - parsed_rows[i][0] for i in range(n - 1)
         ]
-        # The median gap is one row-height; larger gaps indicate missed rows.
         sorted_gaps = sorted(gaps)
         median_gap = sorted_gaps[len(sorted_gaps) // 2]
         if median_gap <= 0:
-            median_gap = 1  # safety
+            median_gap = 1
 
         # ---- convert y-positions to row indices -------------------------
-        # row_index 0 = first detected row; a gap of 2× median means one
-        # row was skipped, so the next index jumps by 2.
         y0 = parsed_rows[0][0]
         row_indices = [round((r[0] - y0) / median_gap) for r in parsed_rows]
 

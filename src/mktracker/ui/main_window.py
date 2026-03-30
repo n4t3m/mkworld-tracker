@@ -10,17 +10,21 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
     QSizePolicy,
+    QSpinBox,
     QStatusBar,
     QVBoxLayout,
     QWidget,
 )
 
 from mktracker.capture.video_source import VideoCapture, enumerate_sources
+from mktracker.detection.match_settings import MatchSettings
 from mktracker.state_machine import GameState, GameStateMachine
 
 _CAPTURE_DIR = "captured_frames"
@@ -100,20 +104,132 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(toolbar)
 
+        # --- main content: video + settings side panel ---
+        content = QHBoxLayout()
+        content.setSpacing(8)
+
         # --- video display ---
         self._video_label = QLabel()
         self._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._video_label.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        self._video_label.setStyleSheet("background-color: #111;")
         self._video_label.setText("No source selected")
         self._video_label.setStyleSheet(
             "background-color: #111; color: #555; font-size: 16px;"
         )
-        layout.addWidget(self._video_label, stretch=1)
+        content.addWidget(self._video_label, stretch=1)
+
+        # --- match settings panel ---
+        content.addWidget(self._build_settings_panel())
+
+        layout.addLayout(content, stretch=1)
 
         self.setStatusBar(QStatusBar())
+
+    def _build_settings_panel(self) -> QGroupBox:
+        group = QGroupBox("Match Settings")
+        group.setFixedWidth(250)
+        form = QFormLayout(group)
+        form.setSpacing(8)
+
+        self._cc_combo = QComboBox()
+        self._cc_combo.addItems(["50cc", "100cc", "150cc"])
+        self._cc_combo.setCurrentText("150cc")
+        self._cc_combo.currentTextChanged.connect(self._on_settings_changed)
+        form.addRow("Class:", self._cc_combo)
+
+        self._teams_combo = QComboBox()
+        self._teams_combo.addItems([
+            "No Teams", "Two Teams", "Three Teams", "Four Teams",
+        ])
+        self._teams_combo.currentTextChanged.connect(self._on_settings_changed)
+        form.addRow("Teams:", self._teams_combo)
+
+        self._items_combo = QComboBox()
+        self._items_combo.addItems([
+            "Normal", "Frantic", "Custom Items", "Mushrooms Only",
+        ])
+        self._items_combo.currentTextChanged.connect(self._on_settings_changed)
+        form.addRow("Items:", self._items_combo)
+
+        self._com_combo = QComboBox()
+        self._com_combo.addItems(["No COM", "Easy", "Normal", "Hard"])
+        self._com_combo.setCurrentText("Normal")
+        self._com_combo.currentTextChanged.connect(self._on_settings_changed)
+        form.addRow("COM:", self._com_combo)
+
+        self._race_count_spin = QSpinBox()
+        self._race_count_spin.setRange(1, 48)
+        self._race_count_spin.setValue(12)
+        self._race_count_spin.valueChanged.connect(self._on_settings_changed)
+        form.addRow("Race count:", self._race_count_spin)
+
+        self._intermission_combo = QComboBox()
+        self._intermission_combo.addItems(["10 seconds", "One minute"])
+        self._intermission_combo.currentTextChanged.connect(
+            self._on_settings_changed,
+        )
+        form.addRow("Intermission:", self._intermission_combo)
+
+        self._settings_status = QLabel("Manual")
+        self._settings_status.setStyleSheet(
+            "color: #888; font-style: italic; margin-top: 4px;"
+        )
+        form.addRow("Source:", self._settings_status)
+
+        # Push the UI values into the state machine on startup.
+        self._push_settings_to_state_machine()
+
+        return group
+
+    # ------------------------------------------------------------------
+    # Settings ↔ state machine synchronisation
+    # ------------------------------------------------------------------
+
+    def _settings_from_ui(self) -> MatchSettings:
+        """Build a ``MatchSettings`` from the current widget values."""
+        return MatchSettings(
+            cc_class=self._cc_combo.currentText(),
+            teams=self._teams_combo.currentText(),
+            items=self._items_combo.currentText(),
+            com_difficulty=self._com_combo.currentText(),
+            race_count=self._race_count_spin.value(),
+            intermission=self._intermission_combo.currentText(),
+        )
+
+    def _load_settings_into_ui(self, settings: MatchSettings) -> None:
+        """Update every widget to reflect *settings*, without triggering
+        ``_on_settings_changed`` recursively."""
+        for widget in (
+            self._cc_combo, self._teams_combo, self._items_combo,
+            self._com_combo, self._intermission_combo, self._race_count_spin,
+        ):
+            widget.blockSignals(True)
+
+        self._cc_combo.setCurrentText(settings.cc_class)
+        self._teams_combo.setCurrentText(settings.teams)
+        self._items_combo.setCurrentText(settings.items)
+        self._com_combo.setCurrentText(settings.com_difficulty)
+        self._race_count_spin.setValue(settings.race_count)
+        self._intermission_combo.setCurrentText(settings.intermission)
+
+        for widget in (
+            self._cc_combo, self._teams_combo, self._items_combo,
+            self._com_combo, self._intermission_combo, self._race_count_spin,
+        ):
+            widget.blockSignals(False)
+
+    def _push_settings_to_state_machine(self) -> None:
+        self._state_machine.match_settings = self._settings_from_ui()
+
+    def _on_settings_changed(self) -> None:
+        """Called when the user edits any setting widget."""
+        self._push_settings_to_state_machine()
+        self._settings_status.setText("Manual")
+        self._settings_status.setStyleSheet(
+            "color: #888; font-style: italic; margin-top: 4px;"
+        )
 
     # ------------------------------------------------------------------
     # Source management
@@ -169,8 +285,23 @@ class MainWindow(QMainWindow):
             detect_interval = _DETECT_EVERY_N_FRAMES
 
         if self._frame_count % detect_interval == 0:
+            prev_settings = self._state_machine.match_settings
             self._state_machine.update(frame)
             self._update_state_label()
+
+            # If the state machine just detected match settings from the
+            # video feed, sync them into the UI widgets.
+            new_settings = self._state_machine.match_settings
+            if (
+                new_settings is not None
+                and new_settings is not prev_settings
+                and prev_settings is not new_settings
+            ):
+                self._load_settings_into_ui(new_settings)
+                self._settings_status.setText("Detected")
+                self._settings_status.setStyleSheet(
+                    "color: #4a4; font-weight: bold; margin-top: 4px;"
+                )
 
         # Convert BGR -> RGB then to QImage
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -196,6 +327,12 @@ class MainWindow(QMainWindow):
     def _on_reset(self) -> None:
         self._state_machine.reset()
         self._update_state_label()
+        # Wipe detected settings — push the current UI values as manual.
+        self._settings_status.setText("Manual")
+        self._settings_status.setStyleSheet(
+            "color: #888; font-style: italic; margin-top: 4px;"
+        )
+        self._push_settings_to_state_machine()
 
     def _on_capture(self) -> None:
         if self._last_frame is None:
