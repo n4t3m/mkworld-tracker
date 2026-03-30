@@ -85,6 +85,10 @@ class MainWindow(QMainWindow):
 
         toolbar.addStretch()
 
+        self._race_label = QLabel()
+        self._race_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        toolbar.addWidget(self._race_label)
+
         self._state_label = QLabel()
         self._state_label.setStyleSheet("font-weight: bold; font-size: 13px;")
         self._update_state_label()
@@ -320,6 +324,12 @@ class MainWindow(QMainWindow):
 
     def _update_state_label(self) -> None:
         self._state_label.setText(self._state_machine.state.name)
+        race = self._state_machine.current_race
+        if race > 0:
+            total = self._state_machine.match_settings.race_count if self._state_machine.match_settings else "?"
+            self._race_label.setText(f"Race {race}/{total}")
+        else:
+            self._race_label.setText("")
 
     def _on_advance(self) -> None:
         self._state_machine.advance()

@@ -33,6 +33,7 @@ class GameState(Enum):
     READING_PLAYERS_IN_RACE = auto()
     WAITING_FOR_RACE_END = auto()
     READING_RACE_RESULTS = auto()
+    FINALIZING_MATCH = auto()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -54,6 +55,7 @@ class GameStateMachine:
 
         self._match_settings: MatchSettings | None = None
         self._races: list[RaceInfo] = []
+        self._current_race: int = 0
         self._match_dir: Path | None = None
         self._pending_track: str | None = None
 
@@ -84,6 +86,18 @@ class GameStateMachine:
         self._match_settings = value
 
     @property
+    def current_race(self) -> int:
+        """Current race number (1-based), or 0 if no match is active."""
+        return self._current_race
+
+    @property
+    def player_count(self) -> int | None:
+        """Number of players in the most recent race, or ``None`` if unknown."""
+        if self._races:
+            return len(self._races[-1].players)
+        return None
+
+    @property
     def races(self) -> list[RaceInfo]:
         return list(self._races)
 
@@ -91,6 +105,7 @@ class GameStateMachine:
         """Reset to WAITING_FOR_MATCH, clearing all match data."""
         self._match_settings = None
         self._races = []
+        self._current_race = 0
         self._pending_track = None
         self._race_placements = {}
         self._race_placement_quality = {}
@@ -105,6 +120,7 @@ class GameStateMachine:
         GameState.READING_PLAYERS_IN_RACE: GameState.WAITING_FOR_RACE_END,
         GameState.WAITING_FOR_RACE_END: GameState.READING_RACE_RESULTS,
         GameState.READING_RACE_RESULTS: GameState.WAITING_FOR_TRACK_PICK,
+        GameState.FINALIZING_MATCH: GameState.WAITING_FOR_MATCH,
     }
 
     def advance(self) -> None:
@@ -201,7 +217,7 @@ class GameStateMachine:
                 "Race results reading timed out after %.0fs", elapsed,
             )
             self._finalise_race_placements()
-            self._transition(GameState.WAITING_FOR_TRACK_PICK)
+            self._transition(self._state_after_race_results())
             return
 
         use_teams = (
@@ -245,7 +261,17 @@ class GameStateMachine:
         elif result["type"] == "overall" and self._seen_race_results:
             logger.info("Overall standings detected — race results complete")
             self._finalise_race_placements()
-            self._transition(GameState.WAITING_FOR_TRACK_PICK)
+            self._transition(self._state_after_race_results())
+
+    def _state_after_race_results(self) -> GameState:
+        """Return the next state after race results are finalised."""
+        if (
+            self._match_settings is not None
+            and self._current_race >= self._match_settings.race_count
+        ):
+            logger.info("Final race completed (%d/%d)", self._current_race, self._match_settings.race_count)
+            return GameState.FINALIZING_MATCH
+        return GameState.WAITING_FOR_TRACK_PICK
 
     def _finalise_race_placements(self) -> None:
         """Log and store accumulated race placements."""
@@ -280,5 +306,9 @@ class GameStateMachine:
 
     def _transition(self, new_state: GameState) -> None:
         logger.info("State: %s -> %s", self._state.name, new_state.name)
+        if new_state is GameState.WAITING_FOR_TRACK_PICK:
+            self._current_race += 1
+        elif new_state is GameState.WAITING_FOR_MATCH:
+            self._current_race = 0
         self._state = new_state
         self._state_entered_at = time.monotonic()
