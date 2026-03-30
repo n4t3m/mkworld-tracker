@@ -227,6 +227,7 @@ class MainWindow(QMainWindow):
         """Called when the user edits any setting widget."""
         self._push_settings_to_state_machine()
         self._settings_status.setText("Manual")
+        self.statusBar().showMessage("Match settings updated", 1500)
         self._settings_status.setStyleSheet(
             "color: #888; font-style: italic; margin-top: 4px;"
         )
