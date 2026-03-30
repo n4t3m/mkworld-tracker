@@ -64,6 +64,7 @@ class GameStateMachine:
         self._result_detector = RaceResultDetector()
 
         self._race_placements: dict[int, str] = {}
+        self._race_placement_quality: dict[int, int] = {}
         self._seen_race_results = False
 
         logger.info("State: WAITING_FOR_MATCH")
@@ -92,6 +93,7 @@ class GameStateMachine:
         self._races = []
         self._pending_track = None
         self._race_placements = {}
+        self._race_placement_quality = {}
         self._seen_race_results = False
         self._track_detector._last_match_time = 0.0
         self._transition(GameState.WAITING_FOR_MATCH)
@@ -187,12 +189,13 @@ class GameStateMachine:
         logger.info("Race finished — FINISH! detected")
         self._track_detector._last_match_time = time.monotonic()
         self._race_placements = {}
+        self._race_placement_quality = {}
         self._seen_race_results = False
         self._transition(GameState.READING_RACE_RESULTS)
 
     def _handle_reading_results(self, frame: np.ndarray) -> None:
-        # Time-out after 30 seconds without seeing overall results.
         elapsed = time.monotonic() - self._state_entered_at
+
         if elapsed > 30.0:
             logger.warning(
                 "Race results reading timed out after %.0fs", elapsed,
@@ -210,11 +213,24 @@ class GameStateMachine:
             return
 
         if result["type"] == "race":
+            results = result["results"]
             self._seen_race_results = True
+            frame_quality = len(results)
             new_count = 0
-            for placement, name in result["results"]:
-                if placement and placement not in self._race_placements:
+            for placement, name in results:
+                if not placement:
+                    continue
+                prev_quality = self._race_placement_quality.get(placement, 0)
+                if placement not in self._race_placements:
+                    # New placement — always store.
                     self._race_placements[placement] = name
+                    self._race_placement_quality[placement] = frame_quality
+                    new_count += 1
+                elif frame_quality > prev_quality:
+                    # This frame detected more rows overall, so its OCR is
+                    # likely more reliable.  Overwrite the earlier value.
+                    self._race_placements[placement] = name
+                    self._race_placement_quality[placement] = frame_quality
                     new_count += 1
             if new_count:
                 _debug_placement_dir = Path("debug_placements")

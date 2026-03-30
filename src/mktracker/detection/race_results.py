@@ -120,7 +120,7 @@ class RaceResultDetector:
 
         results = self._fix_placements(parsed_rows)
 
-        if has_plus:
+        if has_plus and len(results) >= 3:
             return {"type": "race", "results": results}
 
         if len(results) >= _MIN_ROWS_FOR_OVERALL:
@@ -141,13 +141,31 @@ class RaceResultDetector:
 
     @staticmethod
     def _binarise_teams(roi: np.ndarray) -> np.ndarray:
-        """Blur + Otsu on V channel for coloured team bars."""
+        """Blur + Otsu on V channel for coloured team bars.
+
+        The gold first-place bar is the same regardless of team mode, so
+        the top portion also gets the default hybrid threshold OR'd in.
+        """
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         v = hsv[:, :, 2]
         v_blur = cv2.GaussianBlur(v, (5, 5), 0)
         _, binary = cv2.threshold(
             v_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU,
         )
+
+        # The gold first-place bar sits in roughly the top 10% of the ROI.
+        # The V-channel Otsu turns the entire gold bar white (V ≈ 240 for
+        # both text and background), making text unreadable.  Replace the
+        # top portion with the hybrid threshold which cleanly isolates
+        # the white text from the gold background.
+        gold_h = int(roi.shape[0] * 0.10)
+        top = roi[:gold_h]
+        gray_top = cv2.cvtColor(top, cv2.COLOR_BGR2GRAY)
+        blue_top = top[:, :, 0]
+        binary[:gold_h] = ((gray_top > 170) & (blue_top > 100)).astype(
+            np.uint8,
+        ) * 255
+
         return binary
 
     @staticmethod
