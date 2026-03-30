@@ -97,7 +97,7 @@ class RaceResultDetector:
             output_type=pytesseract.Output.DICT,
         )
 
-        words = self._extract_words(data, x1, w)
+        words = self._extract_words(data, x1, w, h)
         rows = self._group_into_rows(words)
 
         parsed_rows: list[tuple[int, int | None, str]] = []
@@ -211,8 +211,12 @@ class RaceResultDetector:
         data: dict,
         x_offset: int,
         frame_w: int,
+        frame_h: int = 0,
     ) -> list[dict]:
         words = []
+        # Result bars never appear in the topmost rows of the frame;
+        # anything there is background / sky noise.
+        min_y = frame_h * 0.02
         for i in range(len(data["text"])):
             text = data["text"][i].strip()
             conf = int(data["conf"][i])
@@ -221,10 +225,16 @@ class RaceResultDetector:
             ox = data["left"][i] // 2 + x_offset
             oy = data["top"][i] // 2
             oh = data["height"][i] // 2
+            if oy + oh // 2 < min_y:
+                continue
+            ow = data["width"][i] // 2
+            # Use the horizontal centre for zone classification so that
+            # names starting near the icon boundary are not misclassified.
+            cx = ox + ow // 2
             words.append({
                 "text": text,
                 "x": ox,
-                "nx": ox / frame_w,
+                "nx": cx / frame_w,
                 "y": oy + oh // 2,
                 "conf": conf,
             })
@@ -282,8 +292,10 @@ class RaceResultDetector:
 
             # Name area (ICON_X_MAX .. NAME_X_MAX)
             clean = re.sub(r"[^A-Za-z0-9\s'\-.]", "", text).strip()
-            # Skip all-digit artefacts and very short noise
-            if not clean or len(clean) < 2 or clean.isdigit():
+            # Skip all-digit artefacts and single-char lowercase noise
+            if not clean or clean.isdigit():
+                continue
+            if len(clean) == 1 and not clean[0].isupper():
                 continue
             name_parts.append(clean)
 
@@ -311,38 +323,62 @@ class RaceResultDetector:
             return [(p if p else 0, name) for _, p, name in parsed_rows]
 
         # ---- estimate row spacing from the y-positions ------------------
+        # Each inter-row gap is a candidate for the single-row spacing.
+        # Try every unique gap value and keep whichever yields the most
+        # anchor agreements.  On ties, prefer lower candidate_first
+        # (earlier placement) to avoid systematic off-by-one shifts.
         gaps = [
             parsed_rows[i + 1][0] - parsed_rows[i][0] for i in range(n - 1)
         ]
-        sorted_gaps = sorted(gaps)
-        median_gap = sorted_gaps[len(sorted_gaps) // 2]
-        if median_gap <= 0:
-            median_gap = 1
 
-        # ---- convert y-positions to row indices -------------------------
-        y0 = parsed_rows[0][0]
-        row_indices = [round((r[0] - y0) / median_gap) for r in parsed_rows]
-
-        # ---- find the best anchor placement -----------------------------
         best_first: int | None = None
         best_score = -1
+        best_max_idx = float("inf")
+        best_gap = 1
 
-        for i, (_, p, _) in enumerate(parsed_rows):
-            if p is None:
-                continue
-            candidate = p - row_indices[i]
-            if candidate < 1:
-                continue
-            score = sum(
-                1
-                for j, (_, pp, _) in enumerate(parsed_rows)
-                if pp is not None and pp == candidate + row_indices[j]
-            )
-            if score > best_score:
-                best_score = score
-                best_first = candidate
+        y0 = parsed_rows[0][0]
 
-        if best_first is not None and best_score >= 2:
+        for gap in set(gaps):
+            if gap <= 0:
+                continue
+
+            row_indices = [
+                round((r[0] - y0) / gap) for r in parsed_rows
+            ]
+            max_idx = max(row_indices)
+
+            for i, (_, p, _) in enumerate(parsed_rows):
+                if p is None:
+                    continue
+                candidate = p - row_indices[i]
+                if candidate < 1:
+                    continue
+                score = sum(
+                    1
+                    for j, (_, pp, _) in enumerate(parsed_rows)
+                    if pp is not None and pp == candidate + row_indices[j]
+                )
+                # Prefer: higher score > lower candidate > smaller max index
+                # (smaller max index avoids over-segmentation from tiny gaps).
+                better = (
+                    score > best_score
+                    or (score == best_score and score > 0 and (
+                        best_first is None
+                        or candidate < best_first
+                        or (candidate == best_first and max_idx < best_max_idx)
+                    ))
+                )
+                if better:
+                    best_score = score
+                    best_first = candidate
+                    best_max_idx = max_idx
+                    best_gap = gap
+
+        if best_first is not None and best_score >= 1:
+            # Recompute row indices with the winning gap.
+            row_indices = [
+                round((r[0] - y0) / best_gap) for r in parsed_rows
+            ]
             return [
                 (best_first + row_indices[i], name)
                 for i, (_, _, name) in enumerate(parsed_rows)
