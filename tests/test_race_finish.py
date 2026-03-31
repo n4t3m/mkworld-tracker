@@ -20,17 +20,25 @@ def _load(name: str):
     return frame
 
 
-def test_detects_finish_screen():
-    assert _detector.is_active(_load("finish_good.png"))
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "finish_good.png",
+        "bad_partial_finish.png",
+    ],
+)
+def test_detects_finish_screen(filename):
+    assert _detector.is_active(_load(filename))
 
 
 @pytest.mark.parametrize(
     "filename",
     [
         "bad_go.png",
-        "bad_partial_finish.png",
         "bad_track_select.png",
         "bad_results.png",
+        "bad_gameplay_boost.png",
+        "bad_gameplay_desert.png",
     ],
 )
 def test_rejects_non_finish(filename):

@@ -199,9 +199,14 @@ class GameStateMachine:
         self._pending_track = None
         self._transition(GameState.WAITING_FOR_RACE_END)
 
+    _DEBUG_FINISH_DIR = Path("debug_finish")
+
     def _handle_race_ending(self, frame: np.ndarray) -> None:
         if not self._finish_detector.is_active(frame):
             return
+        self._DEBUG_FINISH_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        cv2.imwrite(str(self._DEBUG_FINISH_DIR / f"{ts}.png"), frame)
         logger.info("Race finished — FINISH! detected")
         self._track_detector._last_match_time = time.monotonic()
         self._race_placements = {}

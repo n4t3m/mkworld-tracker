@@ -20,12 +20,22 @@ _VAL_MIN = 180
 # Orange pixel ratio bounds — the full text sits in a narrow band;
 # partial animations (overlapping letters) push the ratio above the max.
 _PIXEL_RATIO_MIN = 0.20
-_PIXEL_RATIO_MAX = 0.35
+_PIXEL_RATIO_MAX = 0.42
 
-# The ROI is split into 5 vertical strips; every strip must exceed this
-# threshold so that scattered orange (GO!, environment) is rejected.
+# The ROI is split into 5 vertical strips; at least _STRIP_REQUIRED of them
+# must exceed the threshold so that scattered orange (GO!, environment) is
+# rejected while allowing slight horizontal shifts of the text.
 _STRIP_COUNT = 5
+_STRIP_REQUIRED = 3
 _STRIP_MIN = 0.08
+
+# The FINISH text has a red outline (H 0-10).  Require a minimum red ratio
+# in the ROI to reject desert sand / boost effects that produce diffuse
+# orange without the characteristic red border.
+_RED_HUE_LOW, _RED_HUE_HIGH = 0, 10
+_RED_SAT_MIN = 100
+_RED_VAL_MIN = 100
+_RED_RATIO_MIN = 0.08
 
 
 class RaceFinishDetector:
@@ -53,11 +63,22 @@ class RaceFinishDetector:
         if not (_PIXEL_RATIO_MIN <= ratio <= _PIXEL_RATIO_MAX):
             return False
 
-        # Verify the orange is spread across the full width of the text.
+        # Verify the orange is spread across most of the text width.
         strip_w = mask.shape[1] // _STRIP_COUNT
+        passing_strips = 0
         for i in range(_STRIP_COUNT):
             strip = mask[:, i * strip_w : (i + 1) * strip_w]
-            if float(np.count_nonzero(strip)) / strip.size < _STRIP_MIN:
-                return False
+            if float(np.count_nonzero(strip)) / strip.size >= _STRIP_MIN:
+                passing_strips += 1
 
-        return True
+        if passing_strips < _STRIP_REQUIRED:
+            return False
+
+        # The FINISH text has a red outline that gameplay orange lacks.
+        red_mask = cv2.inRange(
+            hsv,
+            np.array([_RED_HUE_LOW, _RED_SAT_MIN, _RED_VAL_MIN]),
+            np.array([_RED_HUE_HIGH, 255, 255]),
+        )
+        red_ratio = float(np.count_nonzero(red_mask)) / red_mask.size
+        return red_ratio >= _RED_RATIO_MIN
