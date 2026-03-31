@@ -26,7 +26,9 @@ _PB_EXPECTED = {
     1: "Spritz",
     2: "Aho",
     3: "B",
+    4: "mogiSRY",
     6: "Beef Boss",
+    9: "amaro",
     12: "Yae",
 }
 
@@ -42,8 +44,10 @@ _DAN_FRAMES = [
 ]
 _DAN_EXPECTED = {
     1: "KT",
+    2: "mogiSRY",
     3: "Yae",
     5: "Beef Boss",
+    6: "aya",
     7: "Spritz",
     10: "B",
     11: "Aho",
@@ -67,6 +71,8 @@ _KTB_EXPECTED = {
     6: "Spritz",
     7: "Beef Boss",
     8: "mogiSRY",
+    9: "aya",
+    10: "KT",
     11: "Yae",
     12: "KT viti",
 }
@@ -85,10 +91,12 @@ _DDJ_EXPECTED = {
     1: "aya",
     2: "Beef Boss",
     3: "Spritz",
+    5: "ProTime",
     6: "TDB",
     7: "KT",
     8: "Yae",
     9: "Aho",
+    10: "viti",
     11: "B",
     12: "mogiSRY",
 }
