@@ -20,12 +20,20 @@ env/
 .idea/
 *.swp
 
+# Secrets
+.env
+
 # Debug
 debug_frames/
+debug_placements/
 
 # Test data provided externally (not tracked)
 testdata/
 captured_frames/
+
+# Local experiment scripts
+sample_race_results.py
+sample_match_results_gemini.py
 
 # OS
 .DS_Store

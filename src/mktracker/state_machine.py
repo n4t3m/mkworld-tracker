@@ -11,6 +11,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from mktracker.detection.match_results import MatchResultDetector
 from mktracker.detection.match_settings import MatchSettings, MatchSettingsDetector
 from mktracker.detection.player_reader import PlayerReader
 from mktracker.detection.race_finish import RaceFinishDetector
@@ -64,10 +65,12 @@ class GameStateMachine:
         self._player_reader = PlayerReader()
         self._finish_detector = RaceFinishDetector()
         self._result_detector = RaceResultDetector()
+        self._match_result_detector = MatchResultDetector()
 
         self._race_placements: dict[int, str] = {}
         self._race_placement_quality: dict[int, int] = {}
         self._seen_race_results = False
+        self._match_final_results: list[tuple[str, int]] | None = None
 
         logger.info("State: WAITING_FOR_MATCH")
 
@@ -98,6 +101,11 @@ class GameStateMachine:
         return None
 
     @property
+    def match_final_results(self) -> list[tuple[str, int]] | None:
+        """Final match results as ``[(name, points), ...]``, or ``None``."""
+        return self._match_final_results
+
+    @property
     def races(self) -> list[RaceInfo]:
         return list(self._races)
 
@@ -110,6 +118,7 @@ class GameStateMachine:
         self._race_placements = {}
         self._race_placement_quality = {}
         self._seen_race_results = False
+        self._match_final_results = None
         self._track_detector._last_match_time = 0.0
         self._transition(GameState.WAITING_FOR_MATCH)
 
@@ -145,6 +154,8 @@ class GameStateMachine:
             self._handle_race_ending(frame)
         elif self._state is GameState.READING_RACE_RESULTS:
             self._handle_reading_results(frame)
+        elif self._state is GameState.FINALIZING_MATCH:
+            self._handle_finalizing_match(frame)
 
     # -- state handlers ----------------------------------------------------
 
@@ -272,6 +283,25 @@ class GameStateMachine:
             logger.info("Overall standings detected — race results complete")
             self._finalise_race_placements()
             self._transition(self._state_after_race_results())
+
+    def _handle_finalizing_match(self, frame: np.ndarray) -> None:
+        if self._match_final_results is not None:
+            return  # Already captured.
+
+        teams = self._match_settings.teams if self._match_settings else "No Teams"
+        player_count = self.player_count or 12
+
+        result = self._match_result_detector.detect(
+            frame, teams=teams, player_count=player_count,
+        )
+        if result is None:
+            return
+
+        self._match_final_results = result["results"]
+        self._save_frame(frame, "match_results")
+        logger.info("Match final results:")
+        for name, points in result["results"]:
+            logger.info("  %s: %d pts", name, points)
 
     def _state_after_race_results(self) -> GameState:
         """Return the next state after race results are finalised."""

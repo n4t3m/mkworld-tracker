@@ -8,26 +8,46 @@ import cv2
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPushButton,
     QSizePolicy,
     QSpinBox,
     QStatusBar,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from mktracker.capture.video_source import VideoCapture, enumerate_sources
 from mktracker.detection.match_settings import MatchSettings
+from mktracker.gemini_client import (
+    load_api_key, load_model, save_api_key, save_model, verify_api_key,
+)
 from mktracker.state_machine import GameState, GameStateMachine
 
 _CAPTURE_DIR = "captured_frames"
+
+
+class _VerifyThread(QThread):
+    """Runs the Gemini API key health check off the main thread."""
+    finished = Signal(bool, str)  # (ok, message)
+
+    def __init__(self, key: str, model: str) -> None:
+        super().__init__()
+        self._key = key
+        self._model = model
+
+    def run(self) -> None:
+        ok, msg = verify_api_key(self._key, self._model)
+        self.finished.emit(ok, msg)
 
 logger = logging.getLogger(__name__)
 
@@ -86,13 +106,18 @@ class MainWindow(QMainWindow):
         toolbar.addStretch()
 
         self._race_label = QLabel()
-        self._race_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        self._race_label.setStyleSheet("QLabel { font-weight: bold; font-size: 13px; }")
         toolbar.addWidget(self._race_label)
 
         self._state_label = QLabel()
-        self._state_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        self._state_label.setStyleSheet("QLabel { font-weight: bold; font-size: 13px; }")
         self._update_state_label()
         toolbar.addWidget(self._state_label)
+
+        self._gemini_indicator = QLabel("●")
+        self._gemini_indicator.setToolTip("Gemini API: unknown")
+        self._gemini_indicator.setStyleSheet("QLabel { color: #888; font-size: 16px; }")
+        toolbar.addWidget(self._gemini_indicator)
 
         advance_btn = QPushButton("Advance State")
         advance_btn.clicked.connect(self._on_advance)
@@ -124,8 +149,12 @@ class MainWindow(QMainWindow):
         )
         content.addWidget(self._video_label, stretch=1)
 
-        # --- match settings panel ---
-        content.addWidget(self._build_settings_panel())
+        # --- right panel: tabbed settings ---
+        tabs = QTabWidget()
+        tabs.setFixedWidth(270)
+        tabs.addTab(self._build_settings_panel(), "Match")
+        tabs.addTab(self._build_api_settings_panel(), "Settings")
+        content.addWidget(tabs)
 
         layout.addLayout(content, stretch=1)
 
@@ -133,7 +162,6 @@ class MainWindow(QMainWindow):
 
     def _build_settings_panel(self) -> QGroupBox:
         group = QGroupBox("Match Settings")
-        group.setFixedWidth(250)
         form = QFormLayout(group)
         form.setSpacing(8)
 
@@ -178,7 +206,7 @@ class MainWindow(QMainWindow):
 
         self._settings_status = QLabel("Manual")
         self._settings_status.setStyleSheet(
-            "color: #888; font-style: italic; margin-top: 4px;"
+            "QLabel { color: #888; font-style: italic; margin-top: 4px; }"
         )
         form.addRow("Source:", self._settings_status)
 
@@ -186,6 +214,115 @@ class MainWindow(QMainWindow):
         self._push_settings_to_state_machine()
 
         return group
+
+    def _build_api_settings_panel(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        layout.addWidget(QLabel("Gemini API Key:"))
+
+        key_row = QHBoxLayout()
+        self._api_key_edit = QLineEdit()
+        self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._api_key_edit.setPlaceholderText("Paste API key here")
+        key_row.addWidget(self._api_key_edit)
+
+        self._eye_btn = QPushButton("👁")
+        self._eye_btn.setFixedWidth(30)
+        self._eye_btn.setCheckable(True)
+        self._eye_btn.setToolTip("Show/hide API key")
+        self._eye_btn.toggled.connect(self._on_toggle_key_visibility)
+        key_row.addWidget(self._eye_btn)
+        layout.addLayout(key_row)
+
+        layout.addWidget(QLabel("Model:"))
+
+        self._api_model_edit = QLineEdit()
+        self._api_model_edit.setPlaceholderText("e.g. gemma-3-27b-it")
+        layout.addWidget(self._api_model_edit)
+
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(self._on_save_api_key)
+        layout.addWidget(save_btn)
+
+        verify_btn = QPushButton("Verify Key")
+        verify_btn.clicked.connect(self._on_verify_api_key)
+        layout.addWidget(verify_btn)
+
+        self._api_status_label = QLabel()
+        self._api_status_label.setWordWrap(True)
+        layout.addWidget(self._api_status_label)
+
+        layout.addStretch()
+
+        # Load stored values and auto-verify if a key exists
+        stored_key = load_api_key()
+        stored_model = load_model()
+        self._api_model_edit.setText(stored_model)
+        if stored_key:
+            self._api_key_edit.setText(stored_key)
+            self._set_api_status(None, "Verifying API key...")
+            self._run_verify(stored_key, stored_model)
+        else:
+            self._set_api_status(False, "No API key set. Gemini features are unavailable.")
+
+        return widget
+
+    def _set_api_status(self, ok: bool | None, message: str) -> None:
+        """Update the status label. ok=True=green, ok=False=red, ok=None=grey."""
+        if ok is True:
+            color = "#4a4"
+        elif ok is False:
+            color = "#c44"
+        else:
+            color = "#888"
+        self._api_status_label.setStyleSheet(f"QLabel {{ color: {color}; font-style: italic; }}")
+        self._api_status_label.setText(message)
+
+    def _on_save_api_key(self) -> None:
+        key = self._api_key_edit.text().strip()
+        model = self._api_model_edit.text().strip()
+        if not key:
+            self._set_api_status(False, "Cannot save an empty key.")
+            return
+        save_api_key(key)
+        if model:
+            save_model(model)
+        self._set_api_status(None, "Settings saved. Use Verify Key to check the key.")
+
+    def _on_toggle_key_visibility(self, checked: bool) -> None:
+        mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+        self._api_key_edit.setEchoMode(mode)
+
+    def _on_verify_api_key(self) -> None:
+        key = self._api_key_edit.text().strip()
+        model = self._api_model_edit.text().strip()
+        if not key:
+            self._set_api_status(False, "No API key entered.")
+            return
+        self._set_api_status(None, "Verifying...")
+        self._run_verify(key, model)
+
+    def _run_verify(self, key: str, model: str) -> None:
+        if hasattr(self, "_verify_thread") and self._verify_thread.isRunning():
+            return
+        self._verify_thread = _VerifyThread(key, model)
+        self._verify_thread.finished.connect(self._on_verify_done)
+        self._verify_thread.start()
+
+    def _on_verify_done(self, ok: bool, message: str) -> None:
+        if ok:
+            self._set_api_status(True, "API key verified successfully.")
+            self._gemini_indicator.setStyleSheet("QLabel { color: #4a4; font-size: 16px; }")
+            self._gemini_indicator.setToolTip("Gemini API: connected")
+            logger.info("Gemini API key verified successfully.")
+        else:
+            self._set_api_status(False, f"Verification failed: {message}")
+            self._gemini_indicator.setStyleSheet("QLabel { color: #c44; font-size: 16px; }")
+            self._gemini_indicator.setToolTip(f"Gemini API: {message}")
+            logger.warning("Gemini API key verification failed: %s", message)
 
     # ------------------------------------------------------------------
     # Settings ↔ state machine synchronisation
@@ -233,7 +370,7 @@ class MainWindow(QMainWindow):
         self._settings_status.setText("Manual")
         self.statusBar().showMessage("Match settings updated", 1500)
         self._settings_status.setStyleSheet(
-            "color: #888; font-style: italic; margin-top: 4px;"
+            "QLabel { color: #888; font-style: italic; margin-top: 4px; }"
         )
 
     # ------------------------------------------------------------------
@@ -305,7 +442,7 @@ class MainWindow(QMainWindow):
                 self._load_settings_into_ui(new_settings)
                 self._settings_status.setText("Detected")
                 self._settings_status.setStyleSheet(
-                    "color: #4a4; font-weight: bold; margin-top: 4px;"
+                    "QLabel { color: #4a4; font-weight: bold; margin-top: 4px; }"
                 )
 
         # Convert BGR -> RGB then to QImage
@@ -341,7 +478,7 @@ class MainWindow(QMainWindow):
         # Wipe detected settings — push the current UI values as manual.
         self._settings_status.setText("Manual")
         self._settings_status.setStyleSheet(
-            "color: #888; font-style: italic; margin-top: 4px;"
+            "QLabel { color: #888; font-style: italic; margin-top: 4px; }"
         )
         self._push_settings_to_state_machine()
 
