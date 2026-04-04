@@ -8,6 +8,10 @@ Supported layouts:
 * **Two Teams, ≤12 players** — two side-by-side columns (red/blue) with
   up to 6 players each.
 
+* **No Teams, ≤12 players** — single left-side column with up to 12 players.
+  Bars are grey (low saturation, mid brightness); the gold first-place bar
+  is at the top.
+
 Readiness is checked via hue-based bar counting (coloured bars must be
 fully visible).  Names and scores are then OCR'd from each column using
 team-colour-specific binarisation:
@@ -17,6 +21,8 @@ team-colour-specific binarisation:
 * **Blue column** — unsharp-mask on the V channel followed by Otsu.
   Blue-bar text has only ~10 levels of V contrast with the background, so
   name accuracy is limited (scores are more reliable).
+* **No-teams grey bars** — hybrid ``(gray>170 & blue>100)`` threshold,
+  which cleanly isolates white text on both grey and gold bars.
 """
 
 from __future__ import annotations
@@ -62,6 +68,41 @@ _GOLD_TOP_FRACTION = 0.20
 # OCR upscale factor.
 _UPSCALE = 3
 
+# No-teams ≤12 layout — single column occupies the left portion of the screen.
+_NT_COL_X1 = 0.00
+_NT_COL_X2 = 0.56
+_NT_BARS_Y1 = 0.18   # below CONGRATULATIONS!/NICE TRY! banner
+_NT_BARS_Y2 = 0.97
+
+# No-teams >12 layout — two columns side by side.
+# Left column: rank+icon+name+score for players 1–12.
+# Right column: rank+icon+name+score (or just score) for players 13–24.
+_NT24_LEFT_X1 = 0.00
+_NT24_LEFT_X2 = 0.48
+_NT24_RIGHT_X1 = 0.50
+_NT24_RIGHT_X2 = 0.97
+_NT24_BARS_Y1 = 0.18
+_NT24_BARS_Y2 = 0.97
+# Icon skip for >12 columns — the rank badge + avatar icon occupies a larger
+# fraction of the narrower column than in the ≤12 single-column layout.
+_NT24_TEXT_SKIP_X = 0.45
+
+# Banner readiness check — CONGRATULATIONS! / NICE TRY! banner at the top.
+# Real result screens have BOTH yellow text AND a red/orange diagonal stripe.
+# Gameplay frames may have incidental yellow (golden tracks, UI badges) but
+# never the red stripe.  Both conditions must be met.
+_NT_BANNER_Y2 = 0.18        # banner occupies top 18% of frame
+_NT_BANNER_X2 = 0.50        # yellow text is always on the left half
+_NT_BANNER_H_LO = 20        # yellow hue range (OpenCV H 0-179)
+_NT_BANNER_H_HI = 35
+_NT_BANNER_SAT_MIN = 150    # yellow must be saturated
+_NT_BANNER_VAL_MIN = 150    # yellow must be bright
+_NT_BANNER_RATIO_MIN = 0.05  # minimum yellow pixel fraction
+# Red/orange diagonal stripe behind the banner text.
+_NT_BANNER_RED_SAT_MIN = 120
+_NT_BANNER_RED_VAL_MIN = 80
+_NT_BANNER_RED_RATIO_MIN = 0.30  # real screens: ~0.40; gameplay: <0.22
+
 
 class MatchResultDetector:
     """Detect and read final match results from the CONGRATULATIONS! screen."""
@@ -81,7 +122,10 @@ class MatchResultDetector:
         """
         if teams != "No Teams" and player_count <= 12:
             return self._detect_two_teams(frame, player_count)
-        # TODO: <=12 no-teams, >12 no-teams layouts.
+        if teams == "No Teams" and player_count <= 12:
+            return self._detect_no_teams(frame, player_count)
+        if teams == "No Teams" and player_count <= 24:
+            return self._detect_no_teams_24(frame, player_count)
         return None
 
     # ------------------------------------------------------------------
@@ -118,6 +162,90 @@ class MatchResultDetector:
         return {"results": all_results}
 
     # ------------------------------------------------------------------
+    # No-teams layout (≤12 players, single left column)
+    # ------------------------------------------------------------------
+
+    def _detect_no_teams(
+        self, frame: np.ndarray, player_count: int,
+    ) -> dict | None:
+        h, w = frame.shape[:2]
+
+        # Readiness check — yellow CONGRATULATIONS!/NICE TRY! banner at top.
+        if not self._has_result_banner(frame):
+            logger.debug("No-teams match results not ready: banner not detected")
+            return None
+
+        y1 = int(h * _NT_BARS_Y1)
+        y2 = int(h * _NT_BARS_Y2)
+        x1 = int(w * _NT_COL_X1)
+        x2 = int(w * _NT_COL_X2)
+
+        col = frame[y1:y2, x1:x2]
+        results = self._read_no_teams_column(col)
+        return {"results": results}
+
+    # ------------------------------------------------------------------
+    # No-teams layout (>12 players, two columns)
+    # ------------------------------------------------------------------
+
+    def _detect_no_teams_24(
+        self, frame: np.ndarray, player_count: int,
+    ) -> dict | None:
+        h, w = frame.shape[:2]
+
+        if not self._has_result_banner(frame):
+            logger.debug("No-teams 24p match results not ready: banner not detected")
+            return None
+
+        y1 = int(h * _NT24_BARS_Y1)
+        y2 = int(h * _NT24_BARS_Y2)
+
+        left_col = frame[y1:y2, int(w * _NT24_LEFT_X1):int(w * _NT24_LEFT_X2)]
+        right_col = frame[y1:y2, int(w * _NT24_RIGHT_X1):int(w * _NT24_RIGHT_X2)]
+
+        left_results = self._read_no_teams_column(left_col, text_skip=_NT24_TEXT_SKIP_X)
+        right_results = self._read_no_teams_column(right_col, text_skip=_NT24_TEXT_SKIP_X)
+
+        # Left column holds players 1–(player_count//2), right holds the rest.
+        per_col = player_count // 2
+        all_results = left_results[:per_col] + right_results[:per_col]
+        return {"results": all_results}
+
+    def _read_no_teams_column(
+        self, col_img: np.ndarray, *, text_skip: float = _TEXT_SKIP_X,
+    ) -> list[tuple[str, int]]:
+        """Read player names and scores from the no-teams single column."""
+        ch, cw = col_img.shape[:2]
+
+        # Skip rank emblem + avatar icon on the left.
+        text_x1 = int(cw * text_skip)
+        text_region = col_img[:, text_x1:]
+        tw = text_region.shape[1]
+
+        binary = self._binarise_no_teams(text_region)
+
+        up = cv2.resize(
+            binary, None, fx=_UPSCALE, fy=_UPSCALE,
+            interpolation=cv2.INTER_CUBIC,
+        )
+
+        data = pytesseract.image_to_data(
+            up, config="--psm 6",
+            output_type=pytesseract.Output.DICT,
+        )
+
+        words = self._extract_words(data, tw)
+        rows = self._group_into_rows(words)
+
+        results: list[tuple[str, int]] = []
+        for row in rows:
+            name, score = self._parse_row(row)
+            if name and score is not None:
+                results.append((name, score))
+
+        return results
+
+    # ------------------------------------------------------------------
     # Bar detection via hue
     # ------------------------------------------------------------------
 
@@ -147,6 +275,32 @@ class MatchResultDetector:
         if in_bar and len(row_coverage) - start > _BAR_MIN_HEIGHT:
             count += 1
         return count
+
+    @staticmethod
+    def _has_result_banner(frame: np.ndarray) -> bool:
+        """Return True if the CONGRATULATIONS!/NICE TRY! banner is present.
+
+        Requires both yellow text pixels AND a red/orange diagonal stripe.
+        Gameplay frames may have incidental yellow (golden tracks, UI badges)
+        but never the accompanying red stripe.
+        """
+        h, w = frame.shape[:2]
+        banner = frame[:int(h * _NT_BANNER_Y2), :int(w * _NT_BANNER_X2)]
+        hsv = cv2.cvtColor(banner, cv2.COLOR_BGR2HSV)
+        yellow_mask = (
+            (hsv[:, :, 0] >= _NT_BANNER_H_LO)
+            & (hsv[:, :, 0] <= _NT_BANNER_H_HI)
+            & (hsv[:, :, 1] > _NT_BANNER_SAT_MIN)
+            & (hsv[:, :, 2] > _NT_BANNER_VAL_MIN)
+        )
+        if float(yellow_mask.mean()) < _NT_BANNER_RATIO_MIN:
+            return False
+        red_mask = (
+            ((hsv[:, :, 0] < 15) | (hsv[:, :, 0] > 160))
+            & (hsv[:, :, 1] > _NT_BANNER_RED_SAT_MIN)
+            & (hsv[:, :, 2] > _NT_BANNER_RED_VAL_MIN)
+        )
+        return float(red_mask.mean()) >= _NT_BANNER_RED_RATIO_MIN
 
     # ------------------------------------------------------------------
     # Column OCR
@@ -235,6 +389,19 @@ class MatchResultDetector:
         _, binary = cv2.threshold(
             sharp, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU,
         )
+        return binary
+
+    @staticmethod
+    def _binarise_no_teams(text_region: np.ndarray) -> np.ndarray:
+        """Hybrid threshold for white text on grey and gold no-teams bars.
+
+        ``(gray > 170) & (blue > 100)`` isolates white text from both the
+        grey player bars and the gold first-place bar without needing a
+        separate gold-override pass.
+        """
+        gray = cv2.cvtColor(text_region, cv2.COLOR_BGR2GRAY)
+        blue = text_region[:, :, 0]
+        binary = ((gray > 170) & (blue > 100)).astype(np.uint8) * 255
         return binary
 
     # ------------------------------------------------------------------
