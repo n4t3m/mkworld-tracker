@@ -4,20 +4,23 @@
 A Python app that watches a capture card's video feed of Mario Kart and automatically detects game state, match settings, track names, player names, and race result placements using computer vision and OCR.
 
 ## Tech Stack
-- **PySide6** — Qt6 GUI (video display, source selector dropdown, state label, advance/reset buttons, match settings editor)
+- **PySide6** — Qt6 GUI (video display, source selector dropdown, state label, advance/reset buttons, match settings editor, settings tab)
 - **OpenCV** (`opencv-python`) — video capture and frame processing
 - **pytesseract** — OCR via Tesseract (binary must be installed; auto-detected at `C:\Program Files\Tesseract-OCR\`)
+- **python-dotenv** — loads/saves `.env` for Gemini API key and model persistence
 - **Python >=3.10**, packaged with `pyproject.toml` + hatchling
 
 ## Project Structure
 ```
 src/mktracker/
 ├── main.py                      # Entry point, logging setup (INFO level), QApplication
-├── state_machine.py             # GameStateMachine with 6 states, debug frame saving
+├── state_machine.py             # GameStateMachine with 7 states, debug frame saving
+├── gemini_client.py             # Gemini API key/model persistence (.env) and health check
 ├── capture/
 │   └── video_source.py          # Camera enumeration (DirectShow) + VideoCapture wrapper
 ├── detection/
 │   ├── __init__.py              # Shared Tesseract path auto-detection
+│   ├── match_results.py         # MatchResultDetector: final CONGRATULATIONS! screen OCR (two-teams)
 │   ├── match_settings.py        # MatchSettingsDetector + MatchSettings dataclass
 │   ├── player_reader.py         # PlayerReader: dynamic grid detection + per-cell OCR
 │   ├── race_finish.py           # RaceFinishDetector (FINISH! banner via HSV color detection)
@@ -25,7 +28,7 @@ src/mktracker/
 │   ├── track_select.py          # TrackSelectDetector (screen detection + OCR + fuzzy match)
 │   └── tracks.py                # Canonical tuple of 30 track names
 └── ui/
-    └── main_window.py           # MainWindow: video display, state label, settings panel, controls
+    └── main_window.py           # MainWindow: video display, state label, tabbed settings panel, controls
 ```
 
 ## Architecture
@@ -33,7 +36,8 @@ src/mktracker/
 - **PlayerReader** dynamically detects the player grid (row brightness bands + column profiling), OCRs each cell with OTSU thresholding, and cleans avatar-icon noise via regex.
 - **RaceResultDetector** reads placement/name pairs from the post-race results screen. Two preprocessing paths: hybrid threshold `(gray>170 & blue>100)` for no-teams mode, blur+Otsu on HSV V-channel for team-colour mode. Gold first-place bar handled with hybrid threshold in both modes. Uses `image_to_data` for word-level OCR with x-position zones to classify placement numbers, names, and scores. Gap-aware sequential placement fix infers missing placements from y-spacing. Adaptive-V cluster counting on a narrow strip (x=0.84-0.90) detects `+` signs to distinguish race results from overall standings.
 - **GameStateMachine** orchestrates detectors based on current state. Accumulates race result placements across multiple frames with quality-based overwriting (frames with more detected rows can overwrite earlier lower-quality detections).
-- **main_window.py** owns the frame loop (30fps render) and delegates all game logic to the state machine. Displays current state in top-right toolbar with "Advance State" and "Reset State" buttons. Includes a match settings editor panel (right side) that syncs bidirectionally with the state machine.
+- **main_window.py** owns the frame loop (30fps render) and delegates all game logic to the state machine. Displays current state in top-right toolbar with "Advance State" and "Reset State" buttons. Right panel is a `QTabWidget` with a **Match** tab (match settings editor, syncs bidirectionally with state machine) and a **Settings** tab (Gemini API key + model configuration).
+- **gemini_client.py** handles Gemini API key and model persistence in `.env` via `python-dotenv`. Health check uses a GET request to `/v1beta/models/{model}` (no tokens consumed). `_VerifyThread` runs the check off the main thread.
 
 ## Threading Model
 - All detection runs on the main thread every 15th frame (~500ms).
@@ -46,6 +50,7 @@ src/mktracker/
 4. **READING_PLAYERS_IN_RACE** — reads player names on the next frame (gives the player list time to load), transitions to WAITING_FOR_RACE_END
 5. **WAITING_FOR_RACE_END** — polls `RaceFinishDetector` for the FINISH! banner, transitions to READING_RACE_RESULTS
 6. **READING_RACE_RESULTS** — reads placement/name pairs from scrolling results via `RaceResultDetector`, accumulates across frames, transitions to WAITING_FOR_TRACK_PICK when overall standings (no `+` signs) are detected or after 30s timeout
+7. **FINALIZING_MATCH** — polls `MatchResultDetector` for the CONGRATULATIONS! screen; captures final standings (name + points) and logs them
 
 ## Detection Patterns
 - **Track selection screen**: left 42% of frame is very dark (player list panel), right side is colorful map. Track name OCR'd from tight banner ROI at y=33-37%, x=52-85%, upscaled 3x. Fuzzy-matched against 30 canonical track names (difflib, cutoff 0.6).
@@ -56,16 +61,21 @@ src/mktracker/
 - **Race results (teams)**: red/blue bars where text takes on bar colour (grayscale ~100). Gaussian blur + Otsu on HSV V-channel for name reading. Gold first-place bar top 10% replaced with hybrid threshold. `+` detected via adaptive-V cluster counting on a narrow strip (3+ clusters = race results). Minimum 3 detected name-rows required to filter gameplay frame noise.
 
 ## Match Settings UI
-- Right-side panel with dropdowns for Class, Teams, Items, COM, Intermission and a spinbox for Race Count
-- On startup, UI defaults are pushed to the state machine (settings always available even when advancing past match detection)
-- When match settings are detected from video, UI updates to show detected values (label: "Detected")
-- Reset State wipes detected settings and re-applies current UI values as manual
-- The `teams` setting controls which race result preprocessing path is used
+- Right panel is a `QTabWidget` with two tabs: **Match** and **Settings**
+- **Match tab**: dropdowns for Class, Teams, Items, COM, Intermission and a spinbox for Race Count. On startup, UI defaults are pushed to the state machine (settings always available even when advancing past match detection). When match settings are detected from video, UI updates to show detected values (label: "Detected"). Reset State wipes detected settings and re-applies current UI values as manual. The `teams` setting controls which race result preprocessing path is used.
+- **Settings tab**: Gemini API key field (password-masked, with eye toggle to reveal), model name field (defaults to `gemma-3-27b-it`), Save button, and Verify Key button. Status label shows verification result in green/red/grey. A `●` dot indicator in the toolbar reflects the API key status at a glance without opening the tab. Auto-verifies on startup if a key is stored.
+
+## Gemini API
+- Key and model stored in `.env` (gitignored) via `python-dotenv`
+- `gemini_client.py` exposes `load_api_key`, `save_api_key`, `load_model`, `save_model`, `verify_api_key`
+- Health check: `GET /v1beta/models/{model}?key={key}` — no tokens consumed
+- Default model: `gemma-3-27b-it`
+- Verification runs on a background `QThread` to avoid blocking the UI; concurrent verify requests are ignored while one is in flight
 
 ## Debug Frame Saving
 - Each match creates a timestamped folder under `debug_frames/` (gitignored)
-- `match_settings.png`, `race_NN_Track_track.png`, `race_NN_Track_players.png`
-- Race result frames saved to `debug_placements/` when new placements are captured (temporary debugging)
+- `match_settings.png`, `race_NN_Track_track.png`, `race_NN_Track_players.png`, `match_results.png`
+- Race result frames saved to `debug_placements/` (gitignored) when new placements are captured (temporary debugging)
 
 ## Known Limitations
 - **Special Unicode characters** (☆, π, ★, ♪, ⊃) in player names are not reliably OCR'd by Tesseract
