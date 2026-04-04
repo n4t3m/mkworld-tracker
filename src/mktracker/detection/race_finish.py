@@ -20,7 +20,7 @@ _VAL_MIN = 180
 # Orange pixel ratio bounds — the full text sits in a narrow band;
 # partial animations (overlapping letters) push the ratio above the max.
 _PIXEL_RATIO_MIN = 0.20
-_PIXEL_RATIO_MAX = 0.42
+_PIXEL_RATIO_MAX = 0.35
 
 # The ROI is split into 5 vertical strips; at least _STRIP_REQUIRED of them
 # must exceed the threshold so that scattered orange (GO!, environment) is
@@ -43,6 +43,9 @@ _RED_RATIO_MIN = 0.08
 _FINE_STRIP_COUNT = 10
 _FINE_STRIP_MIN = 0.15
 _FINE_CONTIGUOUS_REQUIRED = 5
+# The centred FINISH! text never reaches the outermost ROI columns;
+# environment orange (lava, sand) often does.
+_EDGE_STRIP_MAX = 0.10
 
 
 class RaceFinishDetector:
@@ -101,6 +104,13 @@ class RaceFinishDetector:
             else:
                 current_run = 0
         if best_run < _FINE_CONTIGUOUS_REQUIRED or best_start > _FINE_STRIP_COUNT // 2 - 1:
+            return False
+
+        # Reject environment orange that bleeds into the ROI edges.
+        edge_left = mask[:, :fine_w]
+        edge_right = mask[:, -fine_w:]
+        if (float(np.count_nonzero(edge_left)) / edge_left.size > _EDGE_STRIP_MAX
+                or float(np.count_nonzero(edge_right)) / edge_right.size > _EDGE_STRIP_MAX):
             return False
 
         # The FINISH text has a red outline that gameplay orange lacks.
