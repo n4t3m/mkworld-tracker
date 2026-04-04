@@ -103,7 +103,7 @@ class RaceFinishDetector:
                     best_start = run_start
             else:
                 current_run = 0
-        if best_run < _FINE_CONTIGUOUS_REQUIRED or best_start > _FINE_STRIP_COUNT // 2 - 1:
+        if best_run < _FINE_CONTIGUOUS_REQUIRED or best_start > 2:
             return False
 
         # Reject environment orange that bleeds into the ROI edges.

@@ -43,6 +43,7 @@ def test_detects_finish_screen(filename):
         "bad_gameplay_desert2.png",
         "bad_gameplay_spaceport.png",
         "bad_gameplay_lava.png",
+        "bad_gameplay_yellow_road.png",
     ],
 )
 def test_rejects_non_finish(filename):
