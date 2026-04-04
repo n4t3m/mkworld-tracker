@@ -1,5 +1,9 @@
 """Canonical list of Mario Kart track names."""
 
+from pathlib import Path
+
+TRACK_ICONS_DIR = Path(__file__).resolve().parents[3] / "assets" / "track_icons"
+
 TRACK_NAMES: tuple[str, ...] = (
     "Acorn Heights",
     "Airship Fortress",
@@ -32,3 +36,36 @@ TRACK_NAMES: tuple[str, ...] = (
     "Wario's Galleon",
     "Whistlestop Summit",
 )
+
+TRACK_IMAGES: dict[str, str] = {
+    "Acorn Heights": "MKWorld_Acorn_Heights_Icon.png",
+    "Airship Fortress": "MKWd_Airship_Fortress_Icon.png",
+    "Boo Cinema": "MKWorld_Boo_Cinema_icon.png",
+    "Bowser's Castle": "MKWorld_Bowsers_Castle_icon.png",
+    "Cheep Cheep Falls": "MKWorld_Cheep_Cheep_Falls_icon.png",
+    "Choco Mountain": "MKWorld_Choco_Mountain_icon.png",
+    "Crown City": "MKWd_Crown_City_Icon.png",
+    "Dandelion Depths": "MKWorld_Dandelion_Depths_icon.png",
+    "Desert Hills": "MKWd_Desert_Hills_Icon.png",
+    "Dino Dino Jungle": "Dino_Dino_Jungle_Mario_Kart_World.png",
+    "DK Pass": "MKWd_DK_Pass_Icon.png",
+    "DK Spaceport": "MKWd_DK_Spaceport_Icon.png",
+    "Dry Bones Burnout": "MKWorld_Dry_Bones_Burnout_icon.png",
+    "Faraway Oasis": "MKWd_Faraway_Oasis_Icon.png",
+    "Great ? Block Ruins": "MKWorld_Question_Ruins_icon.png",
+    "Koopa Troopa Beach": "MKWd_Koopa_Troopa_Beach_Icon.png",
+    "Mario Bros. Circuit": "MKWd_Mario_Bros_Circuit_Icon.png",
+    "Mario Circuit": "MKWorld_Mario_Circuit_icon.png",
+    "Moo Moo Meadows": "MKWorld_Moo_Moo_Meadows_icon.png",
+    "Peach Beach": "Peach-Beach-MarioKartWorld.jpg",
+    "Peach Stadium": "MKWd_Peach_Stadium_Icon.png",
+    "Rainbow Road": "MKWorld_Rainbow_Road_icon.png",
+    "Salty Salty Speedway": "Salty_Salty_Speedway_Mario_Kart_World.jpg",
+    "Shy Guy Bazaar": "MKWd_Shy_Guy_Bazaar_Icon.png",
+    "Sky-High Sundae": "MKWd_Sky-High_Sundae_Icon.png",
+    "Starview Peak": "MKWd_Starview_Peak_Icon.png",
+    "Toad's Factory": "MKWorld_Toads_Factory_icon.png",
+    "Wario Stadium": "MKWd_Wario_Stadium_Icon.png",
+    "Wario's Galleon": "MKWd_Wario_Shipyard_Icon.png",
+    "Whistlestop Summit": "MKWd_Whistlestop_Summit_Icon.png",
+}
