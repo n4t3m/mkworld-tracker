@@ -183,8 +183,13 @@ class GameStateMachine:
         self._transition(GameState.READING_PLAYERS_IN_RACE)
 
     def _handle_reading_players(self, frame: np.ndarray) -> None:
+        use_teams = (
+            self._match_settings is not None
+            and self._match_settings.teams != "No Teams"
+        )
         player_names = tuple(
-            p.name for p in self._player_reader.read_players(frame)
+            p.name for p in self._player_reader.read_players(
+                frame, teams=use_teams)
         )
 
         race = RaceInfo(track_name=self._pending_track, players=player_names)

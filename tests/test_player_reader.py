@@ -75,7 +75,7 @@ class TestPlayerReader:
         frame = cv2.imread(image_path)
         assert frame is not None, f"Could not load {image_path}"
 
-        players = reader.read_players(frame)
+        players = reader.read_players(frame, teams=True)
         names = [p.name for p in players]
 
         assert len(names) == 12, (
@@ -91,7 +91,7 @@ class TestPlayerReader:
         self, reader: PlayerReader, image_path: str
     ) -> None:
         frame = cv2.imread(image_path)
-        players = reader.read_players(frame)
+        players = reader.read_players(frame, teams=True)
         names = [p.name for p in players]
 
         # Races 11-12 have a roster change: hawkey -> Axelfy
@@ -114,7 +114,7 @@ class TestPlayerReader:
         """No player should have a blank or whitespace-only name."""
         for image_path in PLAYER_FILES:
             frame = cv2.imread(image_path)
-            players = reader.read_players(frame)
+            players = reader.read_players(frame, teams=True)
             for p in players:
                 assert p.name.strip(), (
                     f"Empty name in {os.path.basename(image_path)}"

@@ -37,8 +37,15 @@ class PlayerInfo:
 class PlayerReader:
     """Reads player names from the track-selection screen."""
 
-    def read_players(self, frame: np.ndarray) -> list[PlayerInfo]:
-        """Return all visible players from the left panel."""
+    def read_players(
+        self, frame: np.ndarray, *, teams: bool = False
+    ) -> list[PlayerInfo]:
+        """Return all visible players from the left panel.
+
+        *teams* selects the preprocessing path: ``True`` for red/blue
+        team-colour bars (V-channel threshold), ``False`` for grey bars
+        (OTSU threshold only).
+        """
         h, w = frame.shape[:2]
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -55,7 +62,8 @@ class PlayerReader:
             for cx1, cx2 in [left_col, right_col]:
                 if cx1 is None:
                     continue
-                info = self._read_cell(frame, gray, ry1, ry2, cx1, cx2)
+                info = self._read_cell(frame, gray, ry1, ry2, cx1, cx2,
+                                       teams=teams)
                 if info is not None:
                     players.append(info)
 
@@ -161,6 +169,8 @@ class PlayerReader:
         ry2: int,
         cx1: int,
         cx2: int,
+        *,
+        teams: bool,
     ) -> PlayerInfo | None:
         box_w = cx2 - cx1
         if box_w < 20:
@@ -175,7 +185,8 @@ class PlayerReader:
         name_x1 = cx1 + int(box_w * _AVATAR_SKIP)
         # Crop right side to exclude score area
         name_x2 = name_x1 + int((cx2 - name_x1) * _SCORE_CROP)
-        name = self._ocr_name(frame, ry1, ry2, name_x1, name_x2)
+        name = self._ocr_name(frame, ry1, ry2, name_x1, name_x2,
+                              teams=teams)
         name = _clean_name(name)
         if len(name) < 1:
             return None
@@ -184,23 +195,33 @@ class PlayerReader:
 
     @staticmethod
     def _ocr_name(
-        frame: np.ndarray, ry1: int, ry2: int, x1: int, x2: int
+        frame: np.ndarray, ry1: int, ry2: int, x1: int, x2: int,
+        *, teams: bool,
     ) -> str:
-        """OCR a player name cell using V-channel threshold with OTSU fallback."""
+        """OCR a player name cell.
+
+        *teams=True* (red/blue bars): V-channel threshold then OTSU fallback.
+        *teams=False* (grey bars): OTSU only — the V-channel threshold
+        only captures sticker-icon noise on grey backgrounds.
+        """
         cell = frame[ry1 + _CELL_PAD_Y : ry2 - _CELL_PAD_Y, x1:x2]
         if cell.size == 0:
             return ""
 
-        # Prepare V-channel thresholded image (handles colored backgrounds)
-        hsv = cv2.cvtColor(cell, cv2.COLOR_BGR2HSV)
-        v_channel = hsv[:, :, 2]
-        _, v_mask = cv2.threshold(v_channel, 160, 255, cv2.THRESH_BINARY)
-        v_up = cv2.resize(
-            v_mask, None, fx=_OCR_SCALE, fy=_OCR_SCALE,
-            interpolation=cv2.INTER_CUBIC,
-        )
+        candidates: list[tuple[np.ndarray, int]] = []
 
-        # Prepare OTSU thresholded image (handles bright/highlighted cells)
+        if teams:
+            # V-channel threshold works well on coloured team bars where
+            # text brightness (V) is much higher than the bar colour.
+            hsv = cv2.cvtColor(cell, cv2.COLOR_BGR2HSV)
+            v_channel = hsv[:, :, 2]
+            _, v_mask = cv2.threshold(v_channel, 160, 255, cv2.THRESH_BINARY)
+            v_up = cv2.resize(
+                v_mask, None, fx=_OCR_SCALE, fy=_OCR_SCALE,
+                interpolation=cv2.INTER_CUBIC,
+            )
+
+        # OTSU handles grey bars and acts as fallback for team bars.
         cell_up = cv2.resize(
             cell, None, fx=_OCR_SCALE, fy=_OCR_SCALE,
             interpolation=cv2.INTER_CUBIC,
@@ -210,8 +231,14 @@ class PlayerReader:
             gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
         )
 
-        # Try V-channel then OTSU, PSM 7 (line) then PSM 8 (word)
-        for img, psm in [(v_up, 7), (otsu, 7), (v_up, 8), (otsu, 8)]:
+        # Interleave V-channel and OTSU per PSM so each threshold gets
+        # a fair shot before moving to the next PSM mode.
+        for psm in (7, 8):
+            if teams:
+                candidates.append((v_up, psm))
+            candidates.append((otsu, psm))
+
+        for img, psm in candidates:
             result = pytesseract.image_to_string(
                 img, config=f"--psm {psm}"
             ).strip()
@@ -231,10 +258,14 @@ def _clean_name(text: str) -> str:
     text = re.sub(r"^o{1,2}\.\s*", "", text)
     # One or more non-alnum chars (possibly with commas/spaces) at the start
     text = re.sub(r"^[^a-zA-Z0-9]+[\s,]*", "", text)
+    # Short alphanumeric + non-alnum noise (e.g. "m@ THE sun", "2€ name")
+    text = re.sub(r"^[a-z0-9]{1,2}[^a-zA-Z0-9\s]+\s*", "", text)
     # Single lowercase letter or digit + space before an uppercase letter
     text = re.sub(r"^[a-z0-9]\s+(?=[A-Z])", "", text)
     # Two lowercase letters + comma/space (e.g. "ma Kod49", "e, Kaleb")
     text = re.sub(r"^[a-z]{1,2}[,\s]+", "", text)
+    # Leading single digit + space (sticker icon read as digit, e.g. "2 shehan")
+    text = re.sub(r"^\d\s+", "", text)
 
     # --- trailing noise (score digits / box border artefacts) ---
     # Trailing " <letters>)" pattern from box edge
