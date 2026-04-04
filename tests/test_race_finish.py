@@ -35,10 +35,12 @@ def test_detects_finish_screen(filename):
     "filename",
     [
         "bad_go.png",
+        "bad_go_warm.png",
         "bad_track_select.png",
         "bad_results.png",
         "bad_gameplay_boost.png",
         "bad_gameplay_desert.png",
+        "bad_gameplay_desert2.png",
     ],
 )
 def test_rejects_non_finish(filename):

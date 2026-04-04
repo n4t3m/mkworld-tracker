@@ -37,6 +37,13 @@ _RED_SAT_MIN = 100
 _RED_VAL_MIN = 100
 _RED_RATIO_MIN = 0.08
 
+# Horizontal spread check: FINISH! spans ~7 characters while GO! spans ~3.
+# Split the ROI into finer strips and require a minimum number of contiguous
+# strips with significant orange to reject narrow text like GO!.
+_FINE_STRIP_COUNT = 10
+_FINE_STRIP_MIN = 0.15
+_FINE_CONTIGUOUS_REQUIRED = 5
+
 
 class RaceFinishDetector:
     """Detects the FINISH! banner displayed at the end of a race."""
@@ -72,6 +79,28 @@ class RaceFinishDetector:
                 passing_strips += 1
 
         if passing_strips < _STRIP_REQUIRED:
+            return False
+
+        # Reject narrow text (GO!) and one-sided environment orange by
+        # requiring the orange to span enough contiguous fine strips AND
+        # start in the left half of the ROI (FINISH! is always centred).
+        fine_w = mask.shape[1] // _FINE_STRIP_COUNT
+        best_run = 0
+        best_start = 0
+        current_run = 0
+        run_start = 0
+        for i in range(_FINE_STRIP_COUNT):
+            fine_strip = mask[:, i * fine_w : (i + 1) * fine_w]
+            if float(np.count_nonzero(fine_strip)) / fine_strip.size >= _FINE_STRIP_MIN:
+                if current_run == 0:
+                    run_start = i
+                current_run += 1
+                if current_run > best_run:
+                    best_run = current_run
+                    best_start = run_start
+            else:
+                current_run = 0
+        if best_run < _FINE_CONTIGUOUS_REQUIRED or best_start > _FINE_STRIP_COUNT // 2 - 1:
             return False
 
         # The FINISH text has a red outline that gameplay orange lacks.
