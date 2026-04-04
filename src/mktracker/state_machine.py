@@ -189,7 +189,7 @@ class GameStateMachine:
         if result is None:
             return
         self._pending_track = result["track_name"]
-        self._save_frame(frame, f"race_{len(self._races) + 1:02d}_{self._pending_track}_track")
+        self._save_race_frame(frame, len(self._races) + 1, "track")
         logger.info("Track detected: %s — reading players on next frame", self._pending_track)
         self._transition(GameState.READING_PLAYERS_IN_RACE)
 
@@ -205,7 +205,7 @@ class GameStateMachine:
 
         race = RaceInfo(track_name=self._pending_track, players=player_names)
         self._races.append(race)
-        self._save_frame(frame, f"race_{len(self._races):02d}_{self._pending_track}_players")
+        self._save_race_frame(frame, len(self._races), "players")
 
         total = self._match_settings.race_count if self._match_settings else "?"
         logger.info("Race %d/%s: %s", len(self._races), total, self._pending_track)
@@ -215,14 +215,10 @@ class GameStateMachine:
         self._pending_track = None
         self._transition(GameState.WAITING_FOR_RACE_END)
 
-    _DEBUG_FINISH_DIR = Path("debug_finish")
-
     def _handle_race_ending(self, frame: np.ndarray) -> None:
         if not self._finish_detector.is_active(frame):
             return
-        self._DEBUG_FINISH_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        cv2.imwrite(str(self._DEBUG_FINISH_DIR / f"{ts}.png"), frame)
+        self._save_race_frame(frame, len(self._races), "finish")
         logger.info("Race finished — FINISH! detected")
         self._track_detector._last_match_time = time.monotonic()
         self._race_placements = {}
@@ -270,12 +266,7 @@ class GameStateMachine:
                     self._race_placement_quality[placement] = frame_quality
                     new_count += 1
             if new_count:
-                _debug_placement_dir = Path("debug_placements")
-                _debug_placement_dir.mkdir(parents=True, exist_ok=True)
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                path = _debug_placement_dir / f"{ts}_placements_{len(self._race_placements):02d}.png"
-                cv2.imwrite(str(path), frame)
-                logger.info("Saved placement frame: %s", path)
+                self._save_race_frame(frame, len(self._races), f"placement_{len(self._race_placements):02d}")
             logger.debug(
                 "Race results so far: %d placements", len(self._race_placements),
             )
@@ -334,9 +325,21 @@ class GameStateMachine:
 
     # -- debug helpers -----------------------------------------------------
 
+    def _save_race_frame(self, frame: np.ndarray, race_num: int, label: str) -> None:
+        if self._match_dir is None:
+            self._match_dir = _DEBUG_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._match_dir.mkdir(parents=True, exist_ok=True)
+        race_dir = self._match_dir / f"race_{race_num:02d}"
+        race_dir.mkdir(exist_ok=True)
+        safe = re.sub(r"[^\w\-]", "_", label)
+        path = race_dir / f"{safe}.png"
+        cv2.imwrite(str(path), frame)
+        logger.debug("Saved debug frame: %s", path)
+
     def _save_frame(self, frame: np.ndarray, label: str) -> None:
         if self._match_dir is None:
-            return
+            self._match_dir = _DEBUG_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._match_dir.mkdir(parents=True, exist_ok=True)
         safe = re.sub(r"[^\w\-]", "_", label)
         path = self._match_dir / f"{safe}.png"
         cv2.imwrite(str(path), frame)
