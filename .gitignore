@@ -26,6 +26,8 @@ env/
 # Debug
 debug_frames/
 debug_placements/
+debug_rank/
+debug_finish/
 
 # Test data provided externally (not tracked)
 testdata/
@@ -34,6 +36,7 @@ captured_frames/
 # Local experiment scripts
 sample_race_results.py
 sample_match_results_gemini.py
+sample_race_rank.py
 
 # OS
 .DS_Store

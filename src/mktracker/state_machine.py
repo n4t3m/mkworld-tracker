@@ -15,6 +15,7 @@ from mktracker.detection.match_results import MatchResultDetector
 from mktracker.detection.match_settings import MatchSettings, MatchSettingsDetector
 from mktracker.detection.player_reader import PlayerReader
 from mktracker.detection.race_finish import RaceFinishDetector
+from mktracker.detection.race_rank import RaceRankDetector
 from mktracker.detection.race_results import RaceResultDetector
 from mktracker.detection.track_select import TrackSelectDetector
 
@@ -25,6 +26,8 @@ _MATCH_START_DELAY = 5.0
 
 # Directory where debug frames are saved.
 _DEBUG_DIR = Path("debug_frames")
+_DEBUG_FINISH_DIR = Path("debug_finish")
+_DEBUG_RANK_DIR = Path("debug_rank")
 
 
 class GameState(Enum):
@@ -33,6 +36,7 @@ class GameState(Enum):
     WAITING_FOR_TRACK_PICK = auto()
     READING_PLAYERS_IN_RACE = auto()
     WAITING_FOR_RACE_END = auto()
+    DETECTING_RACE_RANK = auto()
     READING_RACE_RESULTS = auto()
     FINALIZING_MATCH = auto()
 
@@ -64,6 +68,7 @@ class GameStateMachine:
         self._track_detector = TrackSelectDetector()
         self._player_reader = PlayerReader()
         self._finish_detector = RaceFinishDetector()
+        self._rank_detector = RaceRankDetector()
         self._result_detector = RaceResultDetector()
         self._match_result_detector = MatchResultDetector()
 
@@ -127,7 +132,8 @@ class GameStateMachine:
         GameState.MATCH_STARTED: GameState.WAITING_FOR_TRACK_PICK,
         GameState.WAITING_FOR_TRACK_PICK: GameState.READING_PLAYERS_IN_RACE,
         GameState.READING_PLAYERS_IN_RACE: GameState.WAITING_FOR_RACE_END,
-        GameState.WAITING_FOR_RACE_END: GameState.READING_RACE_RESULTS,
+        GameState.WAITING_FOR_RACE_END: GameState.DETECTING_RACE_RANK,
+        GameState.DETECTING_RACE_RANK: GameState.READING_RACE_RESULTS,
         GameState.READING_RACE_RESULTS: GameState.WAITING_FOR_TRACK_PICK,
         GameState.FINALIZING_MATCH: GameState.WAITING_FOR_MATCH,
     }
@@ -152,6 +158,8 @@ class GameStateMachine:
             self._handle_reading_players(frame)
         elif self._state is GameState.WAITING_FOR_RACE_END:
             self._handle_race_ending(frame)
+        elif self._state is GameState.DETECTING_RACE_RANK:
+            self._handle_detecting_rank(frame)
         elif self._state is GameState.READING_RACE_RESULTS:
             self._handle_reading_results(frame)
         elif self._state is GameState.FINALIZING_MATCH:
@@ -218,12 +226,43 @@ class GameStateMachine:
     def _handle_race_ending(self, frame: np.ndarray) -> None:
         if not self._finish_detector.is_active(frame):
             return
+
+        # Temporary debugging: log the frame that triggered FINISH detection.
+        _DEBUG_FINISH_DIR.mkdir(exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        cv2.imwrite(str(_DEBUG_FINISH_DIR / f"{ts}.png"), frame)
         self._save_race_frame(frame, len(self._races), "finish")
         logger.info("Race finished — FINISH! detected")
         self._track_detector._last_match_time = time.monotonic()
         self._race_placements = {}
         self._race_placement_quality = {}
         self._seen_race_results = False
+        self._transition(GameState.DETECTING_RACE_RANK)
+
+    def _handle_detecting_rank(self, frame: np.ndarray) -> None:
+        elapsed = time.monotonic() - self._state_entered_at
+
+        if elapsed < 1.0:
+            return
+
+        # Save the full frame to debug_rank/ for LLM experimentation.
+        _DEBUG_RANK_DIR.mkdir(exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        cv2.imwrite(str(_DEBUG_RANK_DIR / f"{ts}.png"), frame)
+        self._save_race_frame(frame, len(self._races), "rank")
+        logger.info("Race rank frame captured (1s after FINISH)")
+
+        # # Smart detection logic (commented out for now):
+        # crop = self._rank_detector.detect(frame)
+        # if crop is None:
+        #     if elapsed > 10.0:
+        #         logger.warning("Race rank detection timed out")
+        #     else:
+        #         return
+        # else:
+        #     self._save_race_frame(crop, len(self._races), "rank")
+        #     logger.info("Race rank detected — crop saved")
+
         self._transition(GameState.READING_RACE_RESULTS)
 
     def _handle_reading_results(self, frame: np.ndarray) -> None:

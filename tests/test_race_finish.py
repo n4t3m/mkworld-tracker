@@ -24,7 +24,6 @@ def _load(name: str):
     "filename",
     [
         "finish_good.png",
-        "bad_partial_finish.png",
     ],
 )
 def test_detects_finish_screen(filename):
@@ -38,12 +37,15 @@ def test_detects_finish_screen(filename):
         "bad_go_warm.png",
         "bad_track_select.png",
         "bad_results.png",
+        "bad_partial_finish.png",
         "bad_gameplay_boost.png",
         "bad_gameplay_desert.png",
         "bad_gameplay_desert2.png",
         "bad_gameplay_spaceport.png",
         "bad_gameplay_lava.png",
         "bad_gameplay_yellow_road.png",
+        "bad_false_finish_1.png",
+        "bad_false_finish_2.png",
     ],
 )
 def test_rejects_non_finish(filename):

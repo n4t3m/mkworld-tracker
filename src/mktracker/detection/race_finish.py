@@ -26,7 +26,7 @@ _PIXEL_RATIO_MAX = 0.35
 # must exceed the threshold so that scattered orange (GO!, environment) is
 # rejected while allowing slight horizontal shifts of the text.
 _STRIP_COUNT = 5
-_STRIP_REQUIRED = 3
+_STRIP_REQUIRED = 4
 _STRIP_MIN = 0.08
 
 # The FINISH text has a red outline (H 0-10).  Require a minimum red ratio

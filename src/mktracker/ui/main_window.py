@@ -421,7 +421,10 @@ class MainWindow(QMainWindow):
         self._last_frame = frame
         self._frame_count += 1
 
-        if self._state_machine.state is GameState.READING_RACE_RESULTS:
+        if self._state_machine.state in (
+            GameState.DETECTING_RACE_RANK,
+            GameState.READING_RACE_RESULTS,
+        ):
             detect_interval = _DETECT_FAST_N_FRAMES
         else:
             detect_interval = _DETECT_EVERY_N_FRAMES
