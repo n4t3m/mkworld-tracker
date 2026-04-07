@@ -23,6 +23,14 @@ from mktracker.gemini_client import load_api_key
 from mktracker.gemini_match_results import request_match_results
 from mktracker.gemini_rank import request_race_rank
 from mktracker.gemini_results import request_race_results
+from mktracker.match_record import (
+    FinalStandings,
+    MatchRecord,
+    MatchSettingsRecord,
+    PlayerPlacement,
+    RaceRecord,
+    TeamGroup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +77,13 @@ class GameStateMachine:
         self._races: list[RaceInfo] = []
         self._current_race: int = 0
         self._match_dir: Path | None = None
+        self._match_started_at: datetime | None = None
+        self._match_completed_at: datetime | None = None
+        # Monotonic counter that uniquely identifies the current match.
+        # Bumped on every new match start AND on reset(), so any in-flight
+        # Gemini callback can detect that it has been orphaned and re-route
+        # itself to the original match's on-disk record.
+        self._match_seq: int = 0
         self._pending_track: str | None = None
 
         self._match_detector = MatchSettingsDetector()
@@ -137,6 +152,15 @@ class GameStateMachine:
         self._match_settings = None
         self._races = []
         self._current_race = 0
+        self._match_started_at = None
+        self._match_completed_at = None
+        # Drop the match folder pointer so the next real or manual match
+        # gets a fresh timestamped directory rather than reusing the old one.
+        self._match_dir = None
+        # Invalidate any in-flight Gemini callbacks for the prior match —
+        # they will route their result to the on-disk match record instead
+        # of writing into the (now-cleared) live state.
+        self._match_seq += 1
         self._pending_track = None
         self._race_placements = {}
         self._race_placement_quality = {}
@@ -147,6 +171,47 @@ class GameStateMachine:
         self._match_banner_seen_at = None
         self._track_detector._last_match_time = 0.0
         self._transition(GameState.WAITING_FOR_MATCH)
+
+    def start_manual_match(self) -> bool:
+        """Mark the current state machine as the start of a manual match
+        session, so subsequent meaningful state changes get persisted to
+        ``debug_frames/<timestamp>/match.json``.
+
+        This is the explicit opt-in for users who advance past
+        ``WAITING_FOR_MATCH`` manually and bypass real settings detection.
+        Without this call, ``_save_match_record`` refuses to write because
+        ``_match_started_at`` stays ``None`` — preventing accidental
+        "ghost match" pollution of the history store.
+
+        Returns ``True`` if a manual match was actually started, ``False``
+        if it was a no-op (already in progress, or no settings configured).
+
+        No-op when a match is already in progress; call :meth:`reset` first
+        to start over.
+        """
+        if self._match_started_at is not None:
+            logger.info(
+                "start_manual_match: ignored — match already in progress",
+            )
+            return False
+        if self._match_settings is None:
+            logger.warning(
+                "start_manual_match: ignored — no match settings configured",
+            )
+            return False
+        self._match_seq += 1
+        now = datetime.now()
+        self._match_started_at = now
+        self._match_dir = _DEBUG_DIR / now.strftime("%Y%m%d_%H%M%S")
+        self._match_dir.mkdir(parents=True, exist_ok=True)
+        s = self._match_settings
+        logger.info(
+            "Manual match started — %s, %s, %s, %s, %d races, %s",
+            s.cc_class, s.teams, s.items, s.com_difficulty,
+            s.race_count, s.intermission,
+        )
+        self._save_match_record()
+        return True
 
     _ADVANCE_ORDER = {
         GameState.WAITING_FOR_MATCH: GameState.MATCH_STARTED,
@@ -194,7 +259,12 @@ class GameStateMachine:
             return
         self._match_settings = settings
         self._races = []
-        self._match_dir = _DEBUG_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._match_completed_at = None
+        # Invalidate any in-flight Gemini callbacks for the prior match.
+        self._match_seq += 1
+        now = datetime.now()
+        self._match_started_at = now
+        self._match_dir = _DEBUG_DIR / now.strftime("%Y%m%d_%H%M%S")
         self._match_dir.mkdir(parents=True, exist_ok=True)
         self._save_frame(frame, "match_settings")
         logger.info(
@@ -206,6 +276,7 @@ class GameStateMachine:
             settings.race_count,
             settings.intermission,
         )
+        self._save_match_record()
         self._transition(GameState.MATCH_STARTED)
 
     def _handle_match_started(self) -> None:
@@ -242,6 +313,7 @@ class GameStateMachine:
             logger.info("  - %s", name)
 
         self._pending_track = None
+        self._save_match_record()
         self._transition(GameState.WAITING_FOR_RACE_END)
 
     def _handle_race_ending(self, frame: np.ndarray) -> None:
@@ -275,24 +347,35 @@ class GameStateMachine:
         logger.info("Race rank frame captured (1s after FINISH)")
 
         # Fire async Gemini call to determine the user's race placement.
-        # The race index is captured now so the callback writes to the
-        # correct RaceInfo even after the state machine has moved on.
+        # We capture (race_index, match_seq, match_dir) so the callback can
+        # tell whether the state machine has since moved on to a new match
+        # and, if so, route its result to the original match's on-disk record.
         race_index = len(self._races) - 1
         race_num = race_index + 1
         race_log_dir = self._race_dir(race_num)
         request_race_rank(
             frame.copy(), race_num,
-            self._make_rank_callback(race_index),
+            self._make_rank_callback(race_index, self._match_seq, self._match_dir),
             log_dir=race_log_dir,
         )
 
         self._transition(GameState.READING_RACE_RESULTS)
 
-    def _make_rank_callback(self, race_index: int):
+    def _make_rank_callback(
+        self,
+        race_index: int,
+        match_seq: int,
+        match_dir: Path | None,
+    ):
         """Return a callback that stores a Gemini rank result into the
-        correct ``RaceInfo``.  Runs on a background thread."""
+        correct ``RaceInfo``, or routes it to disk if the match is stale.
+
+        Runs on a background thread."""
         def _on_rank(rank: int | None) -> None:
             with self._races_lock:
+                if match_seq != self._match_seq:
+                    self._apply_stale_rank(match_dir, race_index, rank)
+                    return
                 if race_index < 0 or race_index >= len(self._races):
                     logger.warning(
                         "Gemini rank callback: race index %d out of range "
@@ -305,6 +388,7 @@ class GameStateMachine:
                     "Race %d rank set to %s (track: %s)",
                     race_index + 1, rank, old.track_name,
                 )
+                self._save_match_record()
         return _on_rank
 
     def _handle_reading_results(self, frame: np.ndarray) -> None:
@@ -412,7 +496,7 @@ class GameStateMachine:
         log_dir = self._match_dir
         request_match_results(
             frame.copy(),
-            self._make_match_results_callback(),
+            self._make_match_results_callback(self._match_seq, self._match_dir),
             log_dir=log_dir,
         )
         # Mark as captured so we don't fire again, and transition.
@@ -432,26 +516,40 @@ class GameStateMachine:
             return
 
         self._match_final_results = result["results"]
+        self._match_completed_at = datetime.now()
         self._save_frame(frame, "match_results")
         logger.info("Match final results:")
         for name, points in result["results"]:
             logger.info("  %s: %d pts", name, points)
         self._dump_match_summary()
+        self._save_match_record()
         self._transition(GameState.WAITING_FOR_MATCH)
 
-    def _make_match_results_callback(self):
-        """Return a callback that stores Gemini match results.
+    def _make_match_results_callback(
+        self,
+        match_seq: int,
+        match_dir: Path | None,
+    ):
+        """Return a callback that stores Gemini match results, or routes
+        them to disk if the match is stale.
+
         Runs on a background thread."""
         def _on_results(parsed: dict | None, results: list[tuple[str, int]]) -> None:
-            self._gemini_match_results = parsed
-            if results:
-                self._match_final_results = results
-                logger.info("Match final results from Gemini (%d players):", len(results))
-                for name, points in results:
-                    logger.info("  %s: %d pts", name, points)
-            else:
-                logger.warning("Gemini returned no match results")
-            self._dump_match_summary()
+            with self._races_lock:
+                if match_seq != self._match_seq:
+                    self._apply_stale_match_results(match_dir, parsed, results)
+                    return
+                self._gemini_match_results = parsed
+                if results:
+                    self._match_final_results = results
+                    self._match_completed_at = datetime.now()
+                    logger.info("Match final results from Gemini (%d players):", len(results))
+                    for name, points in results:
+                        logger.info("  %s: %d pts", name, points)
+                else:
+                    logger.warning("Gemini returned no match results")
+                self._dump_match_summary()
+                self._save_match_record()
         return _on_results
 
     def _dump_match_summary(self) -> None:
@@ -509,7 +607,9 @@ class GameStateMachine:
             race_log_dir = self._race_dir(race_num)
             request_race_results(
                 list(self._result_frames), race_num,
-                self._make_results_callback(race_index),
+                self._make_results_callback(
+                    race_index, self._match_seq, self._match_dir,
+                ),
                 log_dir=race_log_dir,
             )
             self._result_frames = []
@@ -532,12 +632,25 @@ class GameStateMachine:
                     old,
                     placements=tuple(sorted(self._race_placements.items())),
                 )
+                self._save_match_record()
 
-    def _make_results_callback(self, race_index: int):
+    def _make_results_callback(
+        self,
+        race_index: int,
+        match_seq: int,
+        match_dir: Path | None,
+    ):
         """Return a callback that stores Gemini race results into the
-        correct ``RaceInfo``.  Runs on a background thread."""
+        correct ``RaceInfo``, or routes them to disk if the match is stale.
+
+        Runs on a background thread."""
         def _on_results(parsed: dict | None, placements: list[tuple[int, str]]) -> None:
             with self._races_lock:
+                if match_seq != self._match_seq:
+                    self._apply_stale_results(
+                        match_dir, race_index, parsed, placements,
+                    )
+                    return
                 if race_index < 0 or race_index >= len(self._races):
                     logger.warning(
                         "Gemini results callback: race index %d out of range "
@@ -557,7 +670,293 @@ class GameStateMachine:
                         logger.info("  %2d. %s", p, name)
                 else:
                     logger.warning("Race %d: Gemini returned no placements", race_index + 1)
+                self._save_match_record()
         return _on_results
+
+    # -- match record persistence -----------------------------------------
+
+    def _save_match_record(self) -> None:
+        """Snapshot current match state and write ``match.json`` to the
+        match folder.  Cheap and idempotent — call freely whenever match
+        data changes.
+
+        **Strict opt-in rule**: persistence is gated on
+        ``_match_started_at`` being set.  That field is only populated by
+        either real settings detection in :meth:`_handle_waiting` or an
+        explicit :meth:`start_manual_match` call.  This prevents "ghost
+        matches" — folders created lazily by frame-saving handlers after
+        a manual ``advance()`` — from polluting the history store with
+        empty or partial records.
+
+        Callers may optionally hold ``_races_lock``; this method does not
+        acquire it.  Reads of ``self._races`` are safe under the GIL because
+        the only mutation by background threads is single-index assignment
+        via :func:`dataclasses.replace`.
+        """
+        if self._match_dir is None or self._match_settings is None:
+            return
+        if self._match_started_at is None:
+            return  # strict rule: never persist a match that wasn't started
+        try:
+            record = self._build_match_record()
+            record.save(self._match_dir)
+        except Exception:
+            logger.exception("Failed to save match record")
+
+    def _build_match_record(self) -> MatchRecord:
+        """Build a :class:`MatchRecord` snapshot of the current match."""
+        assert self._match_settings is not None
+        settings = MatchSettingsRecord(
+            cc_class=self._match_settings.cc_class,
+            teams=self._match_settings.teams,
+            items=self._match_settings.items,
+            com_difficulty=self._match_settings.com_difficulty,
+            race_count=self._match_settings.race_count,
+            intermission=self._match_settings.intermission,
+        )
+        races = [
+            self._build_race_record(i + 1, race)
+            for i, race in enumerate(self._races)
+        ]
+        return MatchRecord(
+            match_id=self._match_dir.name if self._match_dir else "",
+            started_at=(self._match_started_at or datetime.now()).isoformat(),
+            completed_at=(
+                self._match_completed_at.isoformat()
+                if self._match_completed_at else None
+            ),
+            settings=settings,
+            races=races,
+            final_standings=self._build_final_standings(),
+        )
+
+    @staticmethod
+    def _race_fields_from_gemini(
+        gemini: dict,
+    ) -> tuple[str | None, list[TeamGroup], list[PlayerPlacement]]:
+        """Extract ``(mode, teams, placements)`` from a Gemini *race results*
+        response dict.  Used by both the live and stale write paths."""
+        mode = gemini.get("mode")
+        teams_list = gemini.get("teams") or []
+        teams: list[TeamGroup] = []
+        all_placements: list[PlayerPlacement] = []
+        for team in teams_list:
+            tg_players: list[PlayerPlacement] = []
+            for p in team.get("players", []):
+                if p.get("place") is None:
+                    continue
+                tg_players.append(PlayerPlacement(
+                    place=int(p["place"]),
+                    name=str(p.get("name", "")),
+                ))
+            teams.append(TeamGroup(
+                name=team.get("name"),
+                points=team.get("race_points"),
+                winner=team.get("race_winner"),
+                players=tg_players,
+            ))
+            all_placements.extend(tg_players)
+        all_placements.sort(key=lambda pl: pl.place)
+        return mode, teams, all_placements
+
+    @staticmethod
+    def _final_standings_from_gemini(gemini: dict) -> FinalStandings:
+        """Build :class:`FinalStandings` from a Gemini *match results*
+        response dict.  Used by both the live and stale write paths."""
+        mode = gemini.get("mode")
+        teams_list = gemini.get("teams") or []
+        teams: list[TeamGroup] = []
+        all_players: list[PlayerPlacement] = []
+        for team in teams_list:
+            tg_players: list[PlayerPlacement] = []
+            for p in team.get("players", []):
+                if p.get("place") is None:
+                    continue
+                score = p.get("score")
+                tg_players.append(PlayerPlacement(
+                    place=int(p["place"]),
+                    name=str(p.get("name", "")),
+                    score=int(score) if score is not None else None,
+                ))
+            teams.append(TeamGroup(
+                name=team.get("name"),
+                points=team.get("points"),
+                winner=team.get("winner"),
+                players=tg_players,
+            ))
+            all_players.extend(tg_players)
+        all_players.sort(key=lambda pl: pl.place)
+        return FinalStandings(mode=mode, players=all_players, teams=teams)
+
+    @classmethod
+    def _build_race_record(cls, race_number: int, race: RaceInfo) -> RaceRecord:
+        """Convert a :class:`RaceInfo` into a serialisable :class:`RaceRecord`.
+
+        When Gemini structured data is available it is used as the source
+        of truth (richer team info); otherwise the flat OCR placements are
+        used and team fields are left ``None``.
+        """
+        if race.gemini_results:
+            mode, teams, placements = cls._race_fields_from_gemini(race.gemini_results)
+            teams_field: list[TeamGroup] | None = teams
+        else:
+            mode = None
+            teams_field = None
+            placements = [
+                PlayerPlacement(place=int(p), name=str(n))
+                for p, n in race.placements
+            ]
+
+        return RaceRecord(
+            race_number=race_number,
+            track_name=race.track_name,
+            players=list(race.players),
+            user_rank=race.race_rank,
+            mode=mode,
+            placements=placements,
+            teams=teams_field,
+        )
+
+    def _build_final_standings(self) -> FinalStandings | None:
+        """Build :class:`FinalStandings` from Gemini structured results when
+        available, otherwise from the flat OCR ``(name, score)`` list."""
+        gemini = self._gemini_match_results
+        if gemini:
+            return self._final_standings_from_gemini(gemini)
+
+        flat = self._match_final_results
+        if flat:
+            # OCR path: ordered list of (name, score) — derive place from index.
+            return FinalStandings(
+                mode=None,
+                players=[
+                    PlayerPlacement(place=i + 1, name=name, score=score)
+                    for i, (name, score) in enumerate(flat)
+                ],
+                teams=None,
+            )
+
+        return None
+
+    # -- stale-callback writes --------------------------------------------
+
+    def _load_stale_record(self, match_dir: Path | None) -> MatchRecord | None:
+        """Load the on-disk ``match.json`` for an orphaned in-flight callback.
+
+        Returns ``None`` (and logs a warning) if the file is missing or
+        unreadable — the callback then silently drops its result, which is
+        the right thing to do for an orphaned write.
+        """
+        if match_dir is None:
+            return None
+        try:
+            return MatchRecord.load(match_dir)
+        except Exception:
+            logger.warning(
+                "Stale callback: failed to load match %s",
+                match_dir.name, exc_info=True,
+            )
+            return None
+
+    def _save_stale_record(self, match_dir: Path, record: MatchRecord) -> None:
+        try:
+            record.save(match_dir)
+        except OSError:
+            logger.exception("Failed to save stale match %s", match_dir.name)
+
+    def _apply_stale_rank(
+        self, match_dir: Path | None, race_index: int, rank: int | None,
+    ) -> None:
+        """Persist a Gemini rank result whose match has already been
+        replaced in the live state machine."""
+        record = self._load_stale_record(match_dir)
+        if record is None:
+            return
+        if not (0 <= race_index < len(record.races)):
+            logger.warning(
+                "Stale match %s: race index %d out of range (have %d races)",
+                match_dir.name if match_dir else "?", race_index, len(record.races),
+            )
+            return
+        record.races[race_index].user_rank = rank
+        assert match_dir is not None  # _load_stale_record returned non-None
+        self._save_stale_record(match_dir, record)
+        logger.info(
+            "Stale match %s: race %d rank set to %s",
+            match_dir.name, race_index + 1, rank,
+        )
+
+    def _apply_stale_results(
+        self,
+        match_dir: Path | None,
+        race_index: int,
+        parsed: dict | None,
+        placements: list[tuple[int, str]],
+    ) -> None:
+        """Persist Gemini race results whose match has already been replaced."""
+        record = self._load_stale_record(match_dir)
+        if record is None:
+            return
+        if not (0 <= race_index < len(record.races)):
+            logger.warning(
+                "Stale match %s: race index %d out of range (have %d races)",
+                match_dir.name if match_dir else "?", race_index, len(record.races),
+            )
+            return
+        target = record.races[race_index]
+        if parsed:
+            mode, teams, places = self._race_fields_from_gemini(parsed)
+            target.mode = mode
+            target.teams = teams
+            target.placements = places
+        elif placements:
+            target.placements = [
+                PlayerPlacement(place=int(p), name=str(n)) for p, n in placements
+            ]
+        else:
+            return  # nothing to write
+        assert match_dir is not None
+        self._save_stale_record(match_dir, record)
+        logger.info(
+            "Stale match %s: race %d results set (%d placements)",
+            match_dir.name, race_index + 1, len(target.placements),
+        )
+
+    def _apply_stale_match_results(
+        self,
+        match_dir: Path | None,
+        parsed: dict | None,
+        results: list[tuple[str, int]],
+    ) -> None:
+        """Persist Gemini final-standings whose match has already been replaced."""
+        record = self._load_stale_record(match_dir)
+        if record is None:
+            return
+        if parsed:
+            record.final_standings = self._final_standings_from_gemini(parsed)
+        elif results:
+            record.final_standings = FinalStandings(
+                mode=None,
+                players=[
+                    PlayerPlacement(place=i + 1, name=name, score=score)
+                    for i, (name, score) in enumerate(results)
+                ],
+                teams=None,
+            )
+        else:
+            return  # nothing to write
+        if record.completed_at is None:
+            record.completed_at = datetime.now().isoformat()
+        assert match_dir is not None
+        self._save_stale_record(match_dir, record)
+        player_count = (
+            len(record.final_standings.players)
+            if record.final_standings else 0
+        )
+        logger.info(
+            "Stale match %s: final standings set (%d players)",
+            match_dir.name, player_count,
+        )
 
     # -- debug helpers -----------------------------------------------------
 

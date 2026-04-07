@@ -119,6 +119,15 @@ class MainWindow(QMainWindow):
         self._gemini_indicator.setStyleSheet("QLabel { color: #888; font-size: 16px; }")
         toolbar.addWidget(self._gemini_indicator)
 
+        start_manual_btn = QPushButton("Start Manual Match")
+        start_manual_btn.setToolTip(
+            "Begin a manual match session using the current Match settings. "
+            "Required to persist data when advancing past WAITING_FOR_MATCH "
+            "without real settings detection."
+        )
+        start_manual_btn.clicked.connect(self._on_start_manual_match)
+        toolbar.addWidget(start_manual_btn)
+
         advance_btn = QPushButton("Advance State")
         advance_btn.clicked.connect(self._on_advance)
         toolbar.addWidget(advance_btn)
@@ -475,6 +484,20 @@ class MainWindow(QMainWindow):
     def _on_advance(self) -> None:
         self._state_machine.advance()
         self._update_state_label()
+
+    def _on_start_manual_match(self) -> None:
+        # Push current UI settings into the state machine first so the
+        # manual match captures whatever the user currently has selected.
+        self._push_settings_to_state_machine()
+        started = self._state_machine.start_manual_match()
+        self._update_state_label()
+        if started:
+            self.statusBar().showMessage("Manual match started", 2500)
+        else:
+            self.statusBar().showMessage(
+                "Manual match not started — already in progress (use Reset first)",
+                3000,
+            )
 
     def _on_reset(self) -> None:
         self._state_machine.reset()
