@@ -202,6 +202,31 @@ class RaceResultDetector:
 
         return clusters >= _PLUS_MIN_CLUSTERS
 
+    @staticmethod
+    def _has_bar_transitions(frame: np.ndarray) -> bool:
+        """Check for sharp horizontal brightness transitions in the result
+        bar region.  Result bars create distinct brightness steps between
+        adjacent rows; gameplay frames have smooth gradients instead.
+        """
+        h, w = frame.shape[:2]
+        roi = frame[:, int(w * _ROI_X1):int(w * _ROI_X2)]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        row_means = gray.mean(axis=1)
+        diffs = np.abs(np.diff(row_means))
+        return int(np.sum(diffs > 15)) >= 8
+
+    def has_race_results(self, frame: np.ndarray) -> bool:
+        """Return ``True`` if the frame shows race results with ``+`` signs.
+
+        Combines ``_has_plus_clusters`` (detects ``+N`` text) with
+        ``_has_bar_transitions`` (detects result bar structure) to reject
+        gameplay frames that would otherwise cause false positives.
+        """
+        return (
+            self._has_plus_clusters(frame)
+            and self._has_bar_transitions(frame)
+        )
+
     # ------------------------------------------------------------------
     # Word extraction and row parsing
     # ------------------------------------------------------------------

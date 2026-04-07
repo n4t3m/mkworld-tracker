@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import re
+import threading
 import time
 from datetime import datetime
 from enum import Enum, auto
@@ -18,6 +19,10 @@ from mktracker.detection.race_finish import RaceFinishDetector
 from mktracker.detection.race_rank import RaceRankDetector
 from mktracker.detection.race_results import RaceResultDetector
 from mktracker.detection.track_select import TrackSelectDetector
+from mktracker.gemini_client import load_api_key
+from mktracker.gemini_match_results import request_match_results
+from mktracker.gemini_rank import request_race_rank
+from mktracker.gemini_results import request_race_results
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +51,8 @@ class RaceInfo:
     track_name: str
     players: tuple[str, ...]
     placements: tuple[tuple[int, str], ...] = ()
+    race_rank: int | None = None
+    gemini_results: dict | None = None
 
 
 class GameStateMachine:
@@ -72,10 +79,16 @@ class GameStateMachine:
         self._result_detector = RaceResultDetector()
         self._match_result_detector = MatchResultDetector()
 
+        # Lock protecting _races from concurrent writes by Gemini callbacks.
+        self._races_lock = threading.Lock()
+
         self._race_placements: dict[int, str] = {}
         self._race_placement_quality: dict[int, int] = {}
         self._seen_race_results = False
+        self._result_frames: list[np.ndarray] = []
         self._match_final_results: list[tuple[str, int]] | None = None
+        self._gemini_match_results: dict | None = None
+        self._match_banner_seen_at: float | None = None
 
         logger.info("State: WAITING_FOR_MATCH")
 
@@ -111,6 +124,11 @@ class GameStateMachine:
         return self._match_final_results
 
     @property
+    def gemini_match_results(self) -> dict | None:
+        """Full structured Gemini match results, or ``None``."""
+        return self._gemini_match_results
+
+    @property
     def races(self) -> list[RaceInfo]:
         return list(self._races)
 
@@ -123,7 +141,10 @@ class GameStateMachine:
         self._race_placements = {}
         self._race_placement_quality = {}
         self._seen_race_results = False
+        self._result_frames = []
         self._match_final_results = None
+        self._gemini_match_results = None
+        self._match_banner_seen_at = None
         self._track_detector._last_match_time = 0.0
         self._transition(GameState.WAITING_FOR_MATCH)
 
@@ -237,12 +258,13 @@ class GameStateMachine:
         self._race_placements = {}
         self._race_placement_quality = {}
         self._seen_race_results = False
+        self._result_frames = []
         self._transition(GameState.DETECTING_RACE_RANK)
 
     def _handle_detecting_rank(self, frame: np.ndarray) -> None:
         elapsed = time.monotonic() - self._state_entered_at
 
-        if elapsed < 1.0:
+        if elapsed < 2.0:
             return
 
         # Save the full frame to debug_rank/ for LLM experimentation.
@@ -252,18 +274,38 @@ class GameStateMachine:
         self._save_race_frame(frame, len(self._races), "rank")
         logger.info("Race rank frame captured (1s after FINISH)")
 
-        # # Smart detection logic (commented out for now):
-        # crop = self._rank_detector.detect(frame)
-        # if crop is None:
-        #     if elapsed > 10.0:
-        #         logger.warning("Race rank detection timed out")
-        #     else:
-        #         return
-        # else:
-        #     self._save_race_frame(crop, len(self._races), "rank")
-        #     logger.info("Race rank detected — crop saved")
+        # Fire async Gemini call to determine the user's race placement.
+        # The race index is captured now so the callback writes to the
+        # correct RaceInfo even after the state machine has moved on.
+        race_index = len(self._races) - 1
+        race_num = race_index + 1
+        race_log_dir = self._race_dir(race_num)
+        request_race_rank(
+            frame.copy(), race_num,
+            self._make_rank_callback(race_index),
+            log_dir=race_log_dir,
+        )
 
         self._transition(GameState.READING_RACE_RESULTS)
+
+    def _make_rank_callback(self, race_index: int):
+        """Return a callback that stores a Gemini rank result into the
+        correct ``RaceInfo``.  Runs on a background thread."""
+        def _on_rank(rank: int | None) -> None:
+            with self._races_lock:
+                if race_index < 0 or race_index >= len(self._races):
+                    logger.warning(
+                        "Gemini rank callback: race index %d out of range "
+                        "(have %d races)", race_index, len(self._races),
+                    )
+                    return
+                old = self._races[race_index]
+                self._races[race_index] = dataclasses.replace(old, race_rank=rank)
+                logger.info(
+                    "Race %d rank set to %s (track: %s)",
+                    race_index + 1, rank, old.track_name,
+                )
+        return _on_rank
 
     def _handle_reading_results(self, frame: np.ndarray) -> None:
         elapsed = time.monotonic() - self._state_entered_at
@@ -276,6 +318,32 @@ class GameStateMachine:
             self._transition(self._state_after_race_results())
             return
 
+        if load_api_key():
+            self._handle_reading_results_gemini(frame)
+        else:
+            self._handle_reading_results_ocr(frame)
+
+    def _handle_reading_results_gemini(self, frame: np.ndarray) -> None:
+        """Collect frames for Gemini; use lightweight bar + plus-cluster
+        check for state transitions instead of OCR."""
+        has_results = self._result_detector.has_race_results(frame)
+
+        if has_results:
+            self._seen_race_results = True
+            self._result_frames.append(frame.copy())
+            frame_num = len(self._result_frames)
+            self._save_race_frame(frame, len(self._races), f"placement_{frame_num:02d}")
+            logger.debug(
+                "Collected race result frame %d for Gemini", frame_num,
+            )
+        elif self._seen_race_results:
+            logger.info("Overall standings detected — sending %d frames to Gemini",
+                        len(self._result_frames))
+            self._finalise_race_placements()
+            self._transition(self._state_after_race_results())
+
+    def _handle_reading_results_ocr(self, frame: np.ndarray) -> None:
+        """Original OCR-based race results reading."""
         use_teams = (
             self._match_settings is not None
             and self._match_settings.teams != "No Teams"
@@ -318,6 +386,42 @@ class GameStateMachine:
         if self._match_final_results is not None:
             return  # Already captured.
 
+        if load_api_key():
+            self._handle_finalizing_match_gemini(frame)
+        else:
+            self._handle_finalizing_match_ocr(frame)
+
+    def _handle_finalizing_match_gemini(self, frame: np.ndarray) -> None:
+        """Two-phase detection: spot the banner first, then wait 1s for
+        results to load before capturing the frame for Gemini."""
+        if not self._match_result_detector._has_result_banner(frame):
+            return
+
+        if self._match_banner_seen_at is None:
+            # First frame with banner — save it and start the delay.
+            self._match_banner_seen_at = time.monotonic()
+            self._save_frame(frame, "match_banner")
+            logger.info("Match results banner detected — waiting for results to load")
+            return
+
+        if time.monotonic() - self._match_banner_seen_at < 1.0:
+            return
+
+        # 1s has passed since banner appeared — capture and send.
+        self._save_frame(frame, "match_results")
+        log_dir = self._match_dir
+        request_match_results(
+            frame.copy(),
+            self._make_match_results_callback(),
+            log_dir=log_dir,
+        )
+        # Mark as captured so we don't fire again, and transition.
+        self._match_final_results = []
+        logger.info("Match results frame sent to Gemini")
+        self._transition(GameState.WAITING_FOR_MATCH)
+
+    def _handle_finalizing_match_ocr(self, frame: np.ndarray) -> None:
+        """Original OCR-based match results reading."""
         teams = self._match_settings.teams if self._match_settings else "No Teams"
         player_count = self.player_count or 12
 
@@ -332,6 +436,55 @@ class GameStateMachine:
         logger.info("Match final results:")
         for name, points in result["results"]:
             logger.info("  %s: %d pts", name, points)
+        self._dump_match_summary()
+        self._transition(GameState.WAITING_FOR_MATCH)
+
+    def _make_match_results_callback(self):
+        """Return a callback that stores Gemini match results.
+        Runs on a background thread."""
+        def _on_results(parsed: dict | None, results: list[tuple[str, int]]) -> None:
+            self._gemini_match_results = parsed
+            if results:
+                self._match_final_results = results
+                logger.info("Match final results from Gemini (%d players):", len(results))
+                for name, points in results:
+                    logger.info("  %s: %d pts", name, points)
+            else:
+                logger.warning("Gemini returned no match results")
+            self._dump_match_summary()
+        return _on_results
+
+    def _dump_match_summary(self) -> None:
+        """Print a full match summary to the terminal."""
+        sep = "=" * 60
+        print(f"\n{sep}")
+        print("MATCH SUMMARY")
+        print(sep)
+
+        if self._match_settings:
+            s = self._match_settings
+            print(f"Settings: {s.cc_class}, {s.teams}, {s.items}, "
+                  f"{s.com_difficulty}, {s.race_count} races, {s.intermission}")
+        print()
+
+        for i, race in enumerate(self._races, 1):
+            rank_str = f"  (Your rank: {race.race_rank})" if race.race_rank else ""
+            print(f"Race {i}: {race.track_name}{rank_str}")
+            if race.placements:
+                for place, name in race.placements:
+                    print(f"  {place:>2}. {name}")
+            else:
+                print("  (no placements)")
+            print()
+
+        if self._match_final_results:
+            print("Final Standings:")
+            for name, score in self._match_final_results:
+                print(f"  {name}: {score} pts")
+        else:
+            print("Final Standings: (not available)")
+
+        print(sep)
 
     def _state_after_race_results(self) -> GameState:
         """Return the next state after race results are finalised."""
@@ -344,7 +497,25 @@ class GameStateMachine:
         return GameState.WAITING_FOR_TRACK_PICK
 
     def _finalise_race_placements(self) -> None:
-        """Log and store accumulated race placements."""
+        """Log and store accumulated race placements.
+
+        When Gemini frames have been collected, fires an async API call
+        instead of using the OCR-accumulated placements.
+        """
+        if self._result_frames:
+            # Gemini path — fire async call with collected frames.
+            race_index = len(self._races) - 1
+            race_num = race_index + 1
+            race_log_dir = self._race_dir(race_num)
+            request_race_results(
+                list(self._result_frames), race_num,
+                self._make_results_callback(race_index),
+                log_dir=race_log_dir,
+            )
+            self._result_frames = []
+            return
+
+        # OCR path — use accumulated placements.
         if not self._race_placements:
             logger.info("No race placements captured")
             return
@@ -355,21 +526,52 @@ class GameStateMachine:
 
         # Update the most recent RaceInfo with placements.
         if self._races:
-            old = self._races[-1]
-            self._races[-1] = RaceInfo(
-                track_name=old.track_name,
-                players=old.players,
-                placements=tuple(sorted(self._race_placements.items())),
-            )
+            with self._races_lock:
+                old = self._races[-1]
+                self._races[-1] = dataclasses.replace(
+                    old,
+                    placements=tuple(sorted(self._race_placements.items())),
+                )
+
+    def _make_results_callback(self, race_index: int):
+        """Return a callback that stores Gemini race results into the
+        correct ``RaceInfo``.  Runs on a background thread."""
+        def _on_results(parsed: dict | None, placements: list[tuple[int, str]]) -> None:
+            with self._races_lock:
+                if race_index < 0 or race_index >= len(self._races):
+                    logger.warning(
+                        "Gemini results callback: race index %d out of range "
+                        "(have %d races)", race_index, len(self._races),
+                    )
+                    return
+                old = self._races[race_index]
+                self._races[race_index] = dataclasses.replace(
+                    old,
+                    placements=tuple(placements),
+                    gemini_results=parsed,
+                )
+                if placements:
+                    logger.info("Race %d results set (%d placements, track: %s)",
+                                race_index + 1, len(placements), old.track_name)
+                    for p, name in placements:
+                        logger.info("  %2d. %s", p, name)
+                else:
+                    logger.warning("Race %d: Gemini returned no placements", race_index + 1)
+        return _on_results
 
     # -- debug helpers -----------------------------------------------------
 
-    def _save_race_frame(self, frame: np.ndarray, race_num: int, label: str) -> None:
+    def _race_dir(self, race_num: int) -> Path:
+        """Return the debug directory for a given race, creating it if needed."""
         if self._match_dir is None:
             self._match_dir = _DEBUG_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
             self._match_dir.mkdir(parents=True, exist_ok=True)
         race_dir = self._match_dir / f"race_{race_num:02d}"
         race_dir.mkdir(exist_ok=True)
+        return race_dir
+
+    def _save_race_frame(self, frame: np.ndarray, race_num: int, label: str) -> None:
+        race_dir = self._race_dir(race_num)
         safe = re.sub(r"[^\w\-]", "_", label)
         path = race_dir / f"{safe}.png"
         cv2.imwrite(str(path), frame)

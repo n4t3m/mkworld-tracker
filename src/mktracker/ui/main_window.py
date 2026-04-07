@@ -422,6 +422,7 @@ class MainWindow(QMainWindow):
         self._frame_count += 1
 
         if self._state_machine.state in (
+            GameState.WAITING_FOR_RACE_END,
             GameState.DETECTING_RACE_RANK,
             GameState.READING_RACE_RESULTS,
         ):
