@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSpinBox,
+    QStackedWidget,
     QStatusBar,
     QTabWidget,
     QVBoxLayout,
@@ -32,6 +33,7 @@ from mktracker.gemini_client import (
     load_api_key, load_model, save_api_key, save_model, verify_api_key,
 )
 from mktracker.state_machine import GameState, GameStateMachine
+from mktracker.ui.match_history import MatchHistoryView
 
 _CAPTURE_DIR = "captured_frames"
 
@@ -103,6 +105,11 @@ class MainWindow(QMainWindow):
         refresh_btn.clicked.connect(self._refresh_sources)
         toolbar.addWidget(refresh_btn)
 
+        self._view_toggle_btn = QPushButton("Match History")
+        self._view_toggle_btn.setCheckable(True)
+        self._view_toggle_btn.toggled.connect(self._on_toggle_view)
+        toolbar.addWidget(self._view_toggle_btn)
+
         toolbar.addStretch()
 
         self._race_label = QLabel()
@@ -142,8 +149,19 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(toolbar)
 
-        # --- main content: video + settings side panel ---
-        content = QHBoxLayout()
+        # --- stacked content: live view / history view ---
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._build_live_view())
+        self._history_view = MatchHistoryView()
+        self._stack.addWidget(self._history_view)
+        layout.addWidget(self._stack, stretch=1)
+
+        self.setStatusBar(QStatusBar())
+
+    def _build_live_view(self) -> QWidget:
+        container = QWidget()
+        content = QHBoxLayout(container)
+        content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(8)
 
         # --- video display ---
@@ -165,9 +183,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_api_settings_panel(), "Settings")
         content.addWidget(tabs)
 
-        layout.addLayout(content, stretch=1)
-
-        self.setStatusBar(QStatusBar())
+        return container
 
     def _build_settings_panel(self) -> QGroupBox:
         group = QGroupBox("Match Settings")
@@ -383,6 +399,19 @@ class MainWindow(QMainWindow):
         )
 
     # ------------------------------------------------------------------
+    # View switching
+    # ------------------------------------------------------------------
+
+    def _on_toggle_view(self, checked: bool) -> None:
+        if checked:
+            self._history_view.refresh()
+            self._stack.setCurrentIndex(1)
+            self._view_toggle_btn.setText("Live View")
+        else:
+            self._stack.setCurrentIndex(0)
+            self._view_toggle_btn.setText("Match History")
+
+    # ------------------------------------------------------------------
     # Source management
     # ------------------------------------------------------------------
 
@@ -457,6 +486,10 @@ class MainWindow(QMainWindow):
                 self._settings_status.setStyleSheet(
                     "QLabel { color: #4a4; font-weight: bold; margin-top: 4px; }"
                 )
+
+        # Skip the expensive scale/paint when the history view is showing.
+        if self._stack.currentIndex() != 0:
+            return
 
         # Convert BGR -> RGB then to QImage
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)

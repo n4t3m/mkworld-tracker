@@ -58,7 +58,7 @@ TRACK_IMAGES: dict[str, str] = {
     "Mario Circuit": "MKWorld_Mario_Circuit_icon.png",
     "Moo Moo Meadows": "MKWorld_Moo_Moo_Meadows_icon.png",
     "Peach Beach": "Peach-Beach-MarioKartWorld.jpg",
-    "Peach Stadium": "MKWd_Peach_Stadium_Icon.png",
+    "Peach Stadium": "MKWorld_Peach_Stadium_Icon.png",
     "Rainbow Road": "MKWorld_Rainbow_Road_icon.png",
     "Salty Salty Speedway": "Salty_Salty_Speedway_Mario_Kart_World.jpg",
     "Shy Guy Bazaar": "MKWd_Shy_Guy_Bazaar_Icon.png",
