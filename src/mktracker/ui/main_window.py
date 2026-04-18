@@ -168,8 +168,9 @@ class MainWindow(QMainWindow):
         self._video_label = QLabel()
         self._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._video_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
         )
+        self._video_label.setMinimumSize(1, 1)
         self._video_label.setText("No source selected")
         self._video_label.setStyleSheet(
             "background-color: #111; color: #555; font-size: 16px;"
