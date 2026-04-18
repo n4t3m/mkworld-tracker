@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSpinBox,
-    QStackedWidget,
     QStatusBar,
     QTabWidget,
     QVBoxLayout,
@@ -89,7 +88,24 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        # --- toolbar row ---
+        # --- top-level tabs: Live View / Match History / Settings ---
+        self._main_tabs = QTabWidget()
+        self._main_tabs.addTab(self._build_live_view(), "Live View")
+        self._history_view = MatchHistoryView()
+        self._main_tabs.addTab(self._history_view, "Match History")
+        self._main_tabs.addTab(self._build_api_settings_panel(), "Settings")
+        self._main_tabs.currentChanged.connect(self._on_tab_changed)
+        layout.addWidget(self._main_tabs, stretch=1)
+
+        self.setStatusBar(QStatusBar())
+
+    def _build_live_view(self) -> QWidget:
+        container = QWidget()
+        outer = QVBoxLayout(container)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+
+        # --- toolbar row (lives inside the Live View tab) ---
         toolbar = QHBoxLayout()
         toolbar.setSpacing(6)
 
@@ -104,11 +120,6 @@ class MainWindow(QMainWindow):
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self._refresh_sources)
         toolbar.addWidget(refresh_btn)
-
-        self._view_toggle_btn = QPushButton("Match History")
-        self._view_toggle_btn.setCheckable(True)
-        self._view_toggle_btn.toggled.connect(self._on_toggle_view)
-        toolbar.addWidget(self._view_toggle_btn)
 
         toolbar.addStretch()
 
@@ -147,20 +158,9 @@ class MainWindow(QMainWindow):
         capture_btn.clicked.connect(self._on_capture)
         toolbar.addWidget(capture_btn)
 
-        layout.addLayout(toolbar)
+        outer.addLayout(toolbar)
 
-        # --- stacked content: live view / history view ---
-        self._stack = QStackedWidget()
-        self._stack.addWidget(self._build_live_view())
-        self._history_view = MatchHistoryView()
-        self._stack.addWidget(self._history_view)
-        layout.addWidget(self._stack, stretch=1)
-
-        self.setStatusBar(QStatusBar())
-
-    def _build_live_view(self) -> QWidget:
-        container = QWidget()
-        content = QHBoxLayout(container)
+        content = QHBoxLayout()
         content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(8)
 
@@ -176,13 +176,12 @@ class MainWindow(QMainWindow):
         )
         content.addWidget(self._video_label, stretch=1)
 
-        # --- right panel: tabbed settings ---
-        tabs = QTabWidget()
-        tabs.setFixedWidth(270)
-        tabs.addTab(self._build_settings_panel(), "Match")
-        tabs.addTab(self._build_api_settings_panel(), "Settings")
-        content.addWidget(tabs)
+        # --- right panel: match settings editor ---
+        match_panel = self._build_settings_panel()
+        match_panel.setFixedWidth(270)
+        content.addWidget(match_panel)
 
+        outer.addLayout(content, stretch=1)
         return container
 
     def _build_settings_panel(self) -> QGroupBox:
@@ -402,14 +401,9 @@ class MainWindow(QMainWindow):
     # View switching
     # ------------------------------------------------------------------
 
-    def _on_toggle_view(self, checked: bool) -> None:
-        if checked:
+    def _on_tab_changed(self, index: int) -> None:
+        if self._main_tabs.widget(index) is self._history_view:
             self._history_view.refresh()
-            self._stack.setCurrentIndex(1)
-            self._view_toggle_btn.setText("Live View")
-        else:
-            self._stack.setCurrentIndex(0)
-            self._view_toggle_btn.setText("Match History")
 
     # ------------------------------------------------------------------
     # Source management
@@ -487,8 +481,8 @@ class MainWindow(QMainWindow):
                     "QLabel { color: #4a4; font-weight: bold; margin-top: 4px; }"
                 )
 
-        # Skip the expensive scale/paint when the history view is showing.
-        if self._stack.currentIndex() != 0:
+        # Skip the expensive scale/paint when the history tab is showing.
+        if self._main_tabs.currentWidget() is self._history_view:
             return
 
         # Convert BGR -> RGB then to QImage
