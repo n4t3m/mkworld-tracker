@@ -803,7 +803,51 @@ class _MatchTimelinePane(QScrollArea):
         self._layout.setSpacing(10)
         self._layout.addStretch()
         self.setWidget(self._inner)
+
+        # Floating "jump to top" button — parented to the viewport so it stays
+        # pinned to the visible area.  Hidden until the user has scrolled down
+        # far enough that getting back to the top matters.
+        self._jump_top_btn = QPushButton("▲  Top", self.viewport())
+        self._jump_top_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._jump_top_btn.setToolTip("Scroll to top")
+        self._jump_top_btn.setFixedHeight(34)
+        self._jump_top_btn.setStyleSheet(
+            "QPushButton { background-color: rgba(42, 59, 74, 230);"
+            " color: #fff; border: 1px solid #4a6b8a; border-radius: 17px;"
+            " padding: 4px 16px; font-weight: bold; }"
+            " QPushButton:hover { background-color: #35506b; }"
+        )
+        self._jump_top_btn.clicked.connect(
+            lambda: self.verticalScrollBar().setValue(0),
+        )
+        self._jump_top_btn.hide()
+        self.verticalScrollBar().valueChanged.connect(
+            self._update_jump_top_visibility,
+        )
+
         self._show_empty()
+
+    def _update_jump_top_visibility(self, value: int) -> None:
+        visible = value > 300
+        if visible != self._jump_top_btn.isVisible():
+            self._jump_top_btn.setVisible(visible)
+            if visible:
+                self._position_jump_top()
+                self._jump_top_btn.raise_()
+
+    def _position_jump_top(self) -> None:
+        btn = self._jump_top_btn
+        btn.adjustSize()
+        vp = self.viewport()
+        margin = 14
+        btn.move(
+            vp.width() - btn.width() - margin,
+            vp.height() - btn.height() - margin,
+        )
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._position_jump_top()
 
     def _clear(self) -> None:
         while self._layout.count():
