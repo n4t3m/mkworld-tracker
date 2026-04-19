@@ -32,8 +32,8 @@ TRACK_NAMES: tuple[str, ...] = (
     "Sky-High Sundae",
     "Starview Peak",
     "Toad's Factory",
+    "Wario Shipyard",
     "Wario Stadium",
-    "Wario's Galleon",
     "Whistlestop Summit",
 )
 
@@ -65,7 +65,7 @@ TRACK_IMAGES: dict[str, str] = {
     "Sky-High Sundae": "MKWd_Sky-High_Sundae_Icon.png",
     "Starview Peak": "MKWd_Starview_Peak_Icon.png",
     "Toad's Factory": "MKWorld_Toads_Factory_icon.png",
+    "Wario Shipyard": "MKWd_Wario_Shipyard_Icon.png",
     "Wario Stadium": "MKWd_Wario_Stadium_Icon.png",
-    "Wario's Galleon": "MKWd_Wario_Shipyard_Icon.png",
     "Whistlestop Summit": "MKWd_Whistlestop_Summit_Icon.png",
 }
