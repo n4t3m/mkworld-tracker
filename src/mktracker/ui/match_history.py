@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtGui import QColor, QCursor, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -198,6 +199,8 @@ def _summary_line(record: MatchRecord, *, live: bool = False) -> str:
 class _RaceCard(QFrame):
     """One race in the timeline: icon + track name + placements."""
 
+    clicked = Signal(int)  # race_number
+
     def __init__(
         self,
         race: RaceRecord,
@@ -208,10 +211,13 @@ class _RaceCard(QFrame):
         super().__init__()
         self._live = live
         self._settings = settings
+        self._race_number = race.race_number
         self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.setStyleSheet(
             "_RaceCard { background-color: #1a1a1a; border: 1px solid #2a2a2a;"
             " border-radius: 6px; }"
+            " _RaceCard:hover { background-color: #22262b; border: 1px solid #3a4a5a; }"
             " QLabel { color: #ddd; }"
         )
 
@@ -281,6 +287,11 @@ class _RaceCard(QFrame):
             mid.addWidget(placements_widget)
 
         outer.addLayout(mid, stretch=1)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self._race_number)
+        super().mousePressEvent(event)
 
     def _build_team_score(self, race: RaceRecord) -> QWidget | None:
         scores = _race_team_scores(race, self._settings)
@@ -501,12 +512,13 @@ class _FinalStandingsCard(QFrame):
                 layout.addWidget(row)
 
 
-class MatchDetailView(QScrollArea):
+class _MatchTimelinePane(QScrollArea):
     """Scrollable timeline of races for a single match.
 
-    Exposes a single :meth:`set_record` entry point so the same widget can
-    later be reused for the live, in-progress match.
+    Emits :attr:`raceSelected` when the user clicks a race card.
     """
+
+    raceSelected = Signal(int)  # race_number
 
     def __init__(self) -> None:
         super().__init__()
@@ -563,9 +575,9 @@ class MatchDetailView(QScrollArea):
             self._layout.addWidget(note)
         else:
             for race in races:
-                self._layout.addWidget(
-                    _RaceCard(race, record.settings, live=live),
-                )
+                card = _RaceCard(race, record.settings, live=live)
+                card.clicked.connect(self.raceSelected.emit)
+                self._layout.addWidget(card)
 
         if live:
             played = max((r.race_number for r in races), default=0)
@@ -638,6 +650,480 @@ class MatchDetailView(QScrollArea):
         return frame
 
 
+class _ImageCarousel(QWidget):
+    """Shows one image at a time from a list, with prev/next navigation."""
+
+    def __init__(self, paths: list[Path], *, max_width: int = 720) -> None:
+        super().__init__()
+        self._paths = paths
+        self._max_width = max_width
+        self._index = 0
+        self._pixmaps: dict[int, QPixmap] = {}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        # Nav row
+        nav = QHBoxLayout()
+        nav.setSpacing(8)
+        self._prev_btn = QPushButton("◀  Prev")
+        self._prev_btn.setFixedWidth(90)
+        self._prev_btn.clicked.connect(self._go_prev)
+        nav.addWidget(self._prev_btn)
+
+        self._counter = QLabel()
+        self._counter.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._counter.setStyleSheet(
+            "QLabel { color: #bbb; font-weight: bold; font-size: 12px; }"
+        )
+        nav.addWidget(self._counter, stretch=1)
+
+        self._next_btn = QPushButton("Next  ▶")
+        self._next_btn.setFixedWidth(90)
+        self._next_btn.clicked.connect(self._go_next)
+        nav.addWidget(self._next_btn)
+        layout.addLayout(nav)
+
+        # Image display
+        self._image_label = QLabel()
+        self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image_label.setStyleSheet(
+            "QLabel { background-color: #0a0a0a; border: 1px solid #2a2a2a;"
+            " border-radius: 4px; }"
+        )
+        self._image_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed,
+        )
+        layout.addWidget(self._image_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self._render()
+
+    def _load_pixmap(self, index: int) -> QPixmap | None:
+        if index in self._pixmaps:
+            return self._pixmaps[index]
+        path = self._paths[index]
+        pm = QPixmap(str(path))
+        if pm.isNull():
+            return None
+        self._pixmaps[index] = pm
+        return pm
+
+    def _render(self) -> None:
+        n = len(self._paths)
+        if n == 0:
+            self._counter.setText("No images")
+            self._prev_btn.setEnabled(False)
+            self._next_btn.setEnabled(False)
+            self._image_label.setText("No placement frames saved for this race.")
+            self._image_label.setStyleSheet(
+                "QLabel { color: #666; font-style: italic;"
+                " background-color: #0a0a0a; border: 1px solid #2a2a2a;"
+                " border-radius: 4px; padding: 40px; }"
+            )
+            self._image_label.setFixedHeight(120)
+            return
+        self._prev_btn.setEnabled(n > 1)
+        self._next_btn.setEnabled(n > 1)
+        self._counter.setText(
+            f"{self._paths[self._index].name}   —   Frame {self._index + 1} of {n}"
+        )
+        pm = self._load_pixmap(self._index)
+        if pm is None:
+            self._image_label.setText(f"Could not load {self._paths[self._index].name}")
+            self._image_label.setFixedHeight(80)
+            return
+        scaled = pm.scaledToWidth(
+            self._max_width, Qt.TransformationMode.SmoothTransformation,
+        )
+        self._image_label.setPixmap(scaled)
+        # Lock the label to the pixmap's exact size so surrounding layout can't
+        # squeeze it shorter and clip the top with the center-aligned pixmap.
+        self._image_label.setFixedSize(scaled.size())
+
+    def _go_prev(self) -> None:
+        if not self._paths:
+            return
+        self._index = (self._index - 1) % len(self._paths)
+        self._render()
+
+    def _go_next(self) -> None:
+        if not self._paths:
+            return
+        self._index = (self._index + 1) % len(self._paths)
+        self._render()
+
+
+def _fit_image_to_width(path: Path, max_width: int = 720) -> QPixmap | None:
+    if not path.exists():
+        return None
+    pm = QPixmap(str(path))
+    if pm.isNull():
+        return None
+    return pm.scaledToWidth(max_width, Qt.TransformationMode.SmoothTransformation)
+
+
+class _RaceDetailView(QWidget):
+    """Single-race detail screen with a sticky header and a scrollable body
+    (Gemini summary + debug images)."""
+
+    backRequested = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Sticky header — lives outside the scroll area.
+        self._header_host = QWidget()
+        self._header_layout = QVBoxLayout(self._header_host)
+        self._header_layout.setContentsMargins(12, 12, 12, 0)
+        self._header_layout.setSpacing(0)
+        outer.addWidget(self._header_host)
+
+        # Scrollable body below it.
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._inner = QWidget()
+        self._layout = QVBoxLayout(self._inner)
+        self._layout.setContentsMargins(12, 12, 12, 12)
+        self._layout.setSpacing(12)
+        self._layout.addStretch()
+        self._scroll.setWidget(self._inner)
+        outer.addWidget(self._scroll, stretch=1)
+
+    def _clear_layout(self, layout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def set_race(
+        self,
+        race: RaceRecord,
+        settings: MatchSettingsRecord,
+        match_dir: Path,
+    ) -> None:
+        self._clear_layout(self._header_layout)
+        self._clear_layout(self._layout)
+
+        # Sticky header stays visible while scrolling.
+        self._header_layout.addWidget(self._build_header(race))
+
+        self._layout.addWidget(self._build_gemini_summary(race, settings))
+
+        race_dir = match_dir / f"race_{race.race_number:02d}"
+        self._layout.addWidget(self._build_single_image_section(
+            "Track Selection", race_dir / "track.png",
+        ))
+        self._layout.addWidget(self._build_single_image_section(
+            "Finish", race_dir / "finish.png",
+        ))
+        self._layout.addWidget(self._build_placements_section(race_dir))
+
+        self._layout.addStretch()
+        self._scroll.verticalScrollBar().setValue(0)
+
+    # --- header ---
+
+    def _build_header(self, race: RaceRecord) -> QWidget:
+        frame = QFrame()
+        frame.setStyleSheet(
+            "QFrame { background-color: #14181f; border: 1px solid #232a33;"
+            " border-radius: 6px; }"
+            " QLabel { color: #ddd; }"
+        )
+        outer = QHBoxLayout(frame)
+        outer.setContentsMargins(10, 8, 10, 8)
+        outer.setSpacing(12)
+
+        back = QPushButton("◀  Back to match")
+        back.setFixedHeight(32)
+        back.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        back.setStyleSheet(
+            "QPushButton { background-color: #2a3b4a; color: #fff; border: none;"
+            " border-radius: 4px; padding: 6px 12px; font-weight: bold; }"
+            " QPushButton:hover { background-color: #35506b; }"
+        )
+        back.clicked.connect(self.backRequested.emit)
+        outer.addWidget(back)
+
+        icon = _load_track_icon(race.track_name)
+        if icon is not None:
+            icon_label = QLabel()
+            scaled = icon.scaledToHeight(
+                48, Qt.TransformationMode.SmoothTransformation,
+            )
+            icon_label.setPixmap(scaled)
+            outer.addWidget(icon_label)
+
+        title = QLabel(
+            f"Race {race.race_number}  —  {race.track_name or 'Unknown track'}",
+        )
+        title.setStyleSheet(
+            "QLabel { font-size: 18px; font-weight: bold; color: #fff; }"
+        )
+        outer.addWidget(title, stretch=1)
+
+        if race.user_rank is not None:
+            badge = QLabel(f"Your rank: {race.user_rank}")
+            badge.setStyleSheet(
+                "QLabel { background-color: #2d4; color: #042; font-weight: bold;"
+                " padding: 4px 12px; border-radius: 12px; font-size: 13px; }"
+            )
+            outer.addWidget(badge)
+
+        top_btn = QPushButton("▲  Top")
+        top_btn.setFixedHeight(32)
+        top_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        top_btn.setToolTip("Scroll to top")
+        top_btn.setStyleSheet(
+            "QPushButton { background-color: #2a2a2a; color: #ddd; border: none;"
+            " border-radius: 4px; padding: 6px 12px; font-weight: bold; }"
+            " QPushButton:hover { background-color: #3a3a3a; color: #fff; }"
+        )
+        top_btn.clicked.connect(
+            lambda: self._scroll.verticalScrollBar().setValue(0),
+        )
+        outer.addWidget(top_btn)
+
+        return frame
+
+    # --- Gemini summary section ---
+
+    def _build_gemini_summary(
+        self, race: RaceRecord, settings: MatchSettingsRecord,
+    ) -> QWidget:
+        frame = QFrame()
+        frame.setStyleSheet(
+            "QFrame { background-color: #16201f; border: 1px solid #2a4a44;"
+            " border-radius: 6px; }"
+            " QLabel { color: #ddd; }"
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(6)
+
+        heading = QLabel("Race Results")
+        heading.setStyleSheet(
+            "QLabel { font-size: 15px; font-weight: bold; color: #8fd; }"
+        )
+        layout.addWidget(heading)
+
+        # Mode line
+        meta_parts: list[str] = []
+        if race.mode:
+            meta_parts.append(f"Mode: {race.mode}")
+        meta_parts.append(f"Settings mode: {settings.teams}")
+        if race.user_rank is not None:
+            meta_parts.append(f"Your rank: {race.user_rank}")
+        meta = QLabel("  ·  ".join(meta_parts))
+        meta.setStyleSheet("QLabel { color: #9ab; font-size: 12px; }")
+        layout.addWidget(meta)
+
+        # Team score summary if applicable
+        scores = _race_team_scores(race, settings)
+        if scores is not None and len(scores) >= 2:
+            ranked = sorted(scores, key=lambda kv: kv[1], reverse=True)
+            winner_name, winner_pts = ranked[0]
+            runner_pts = ranked[1][1]
+            delta = winner_pts - runner_pts
+            if delta > 0:
+                winner_line = QLabel(
+                    f"🏆 Winner: {winner_name}  ({winner_pts} pts,  +{delta})",
+                )
+            else:
+                winner_line = QLabel(f"🤝 Tied at {winner_pts} pts")
+            winner_line.setStyleSheet(
+                "QLabel { color: #fd4; font-weight: bold; font-size: 14px; }"
+            )
+            layout.addWidget(winner_line)
+
+            score_line = QLabel(
+                "Team score:  "
+                + "    ·    ".join(f"{name} {pts}" for name, pts in ranked),
+            )
+            score_line.setStyleSheet("QLabel { color: #fc8; font-size: 13px; }")
+            layout.addWidget(score_line)
+
+        # Placements
+        if race.teams and len(race.teams) >= 2:
+            for team in race.teams:
+                header_parts: list[str] = []
+                if team.name:
+                    header_parts.append(team.name)
+                if team.points is not None:
+                    header_parts.append(f"{team.points} pts")
+                header_text = " — ".join(header_parts) or "Team"
+                th = QLabel(header_text)
+                style = "QLabel { font-weight: bold; color: #fc8; margin-top: 4px; }"
+                if team.winner:
+                    style = (
+                        "QLabel { font-weight: bold; color: #fd4; margin-top: 4px; }"
+                    )
+                th.setStyleSheet(style)
+                layout.addWidget(th)
+                for p in sorted(team.players, key=lambda x: x.place):
+                    row = QLabel(f"    {p.place:>2}.  {p.name}")
+                    row.setStyleSheet(
+                        "QLabel { color: #ccc; font-family: Consolas, monospace; }"
+                    )
+                    layout.addWidget(row)
+        elif race.placements:
+            for p in sorted(race.placements, key=lambda x: x.place):
+                row = QLabel(f"{p.place:>2}.  {p.name}")
+                row.setStyleSheet(
+                    "QLabel { color: #ccc; font-family: Consolas, monospace; }"
+                )
+                layout.addWidget(row)
+        else:
+            note = QLabel("No placements recorded for this race.")
+            note.setStyleSheet("QLabel { color: #888; font-style: italic; }")
+            layout.addWidget(note)
+
+        return frame
+
+    # --- image sections ---
+
+    def _build_single_image_section(self, title: str, path: Path) -> QWidget:
+        frame = QFrame()
+        frame.setStyleSheet(
+            "QFrame { background-color: #141414; border: 1px solid #2a2a2a;"
+            " border-radius: 6px; }"
+            " QLabel { color: #ddd; }"
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(6)
+
+        heading = QLabel(title)
+        heading.setStyleSheet(
+            "QLabel { font-size: 14px; font-weight: bold; color: #ace; }"
+        )
+        layout.addWidget(heading)
+
+        image_label = QLabel()
+        image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        image_label.setStyleSheet(
+            "QLabel { background-color: #0a0a0a; border: 1px solid #222;"
+            " border-radius: 4px; }"
+        )
+        pm = _fit_image_to_width(path, max_width=720)
+        if pm is None:
+            image_label.setText(f"{path.name} not available")
+            image_label.setStyleSheet(
+                "QLabel { color: #666; font-style: italic;"
+                " background-color: #0a0a0a; border: 1px solid #222;"
+                " border-radius: 4px; padding: 30px; }"
+            )
+            image_label.setFixedHeight(80)
+        else:
+            image_label.setPixmap(pm)
+            image_label.setFixedSize(pm.size())
+        layout.addWidget(image_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        return frame
+
+    def _build_placements_section(self, race_dir: Path) -> QWidget:
+        frame = QFrame()
+        frame.setStyleSheet(
+            "QFrame { background-color: #141414; border: 1px solid #2a2a2a;"
+            " border-radius: 6px; }"
+            " QLabel { color: #ddd; }"
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(6)
+
+        paths: list[Path] = []
+        if race_dir.exists():
+            paths = sorted(race_dir.glob("placement_*.png"))
+
+        heading = QLabel(
+            f"Placements screens ({len(paths)} frame"
+            f"{'s' if len(paths) != 1 else ''})",
+        )
+        heading.setStyleSheet(
+            "QLabel { font-size: 14px; font-weight: bold; color: #ace; }"
+        )
+        layout.addWidget(heading)
+
+        carousel = _ImageCarousel(paths, max_width=720)
+        layout.addWidget(carousel)
+        return frame
+
+
+class MatchDetailView(QWidget):
+    """Right-hand detail pane: stacked match-timeline + race-detail views."""
+
+    def __init__(self, debug_dir: Path = DEFAULT_DEBUG_DIR) -> None:
+        super().__init__()
+        self._debug_dir = debug_dir
+        self._current_record: MatchRecord | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._stack = QStackedWidget()
+        self._timeline = _MatchTimelinePane()
+        self._timeline.raceSelected.connect(self._on_race_selected)
+        self._race_detail = _RaceDetailView()
+        self._race_detail.backRequested.connect(self._show_timeline)
+
+        self._stack.addWidget(self._timeline)    # index 0
+        self._stack.addWidget(self._race_detail)  # index 1
+        layout.addWidget(self._stack)
+
+    @property
+    def is_showing_race_detail(self) -> bool:
+        return self._stack.currentIndex() == 1
+
+    def set_debug_dir(self, debug_dir: Path) -> None:
+        self._debug_dir = debug_dir
+
+    def set_record(
+        self,
+        record: MatchRecord,
+        *,
+        live: bool = False,
+        live_status: str | None = None,
+    ) -> None:
+        prev_id = self._current_record.match_id if self._current_record else None
+        self._current_record = record
+        self._timeline.set_record(record, live=live, live_status=live_status)
+        # Snap back to the timeline when switching to a different match so the
+        # user doesn't see a stale race-detail page from a prior selection.
+        # tick() already skips updates while race-detail is showing, so same-
+        # match live refreshes won't reach this branch.
+        if prev_id != record.match_id:
+            self._stack.setCurrentIndex(0)
+
+    def clear(self) -> None:
+        self._current_record = None
+        self._timeline.clear()
+        self._stack.setCurrentIndex(0)
+
+    def _show_timeline(self) -> None:
+        self._stack.setCurrentIndex(0)
+
+    def _on_race_selected(self, race_number: int) -> None:
+        record = self._current_record
+        if record is None:
+            return
+        race = next(
+            (r for r in record.races if r.race_number == race_number),
+            None,
+        )
+        if race is None:
+            return
+        match_dir = self._debug_dir / record.match_id
+        self._race_detail.set_race(race, record.settings, match_dir)
+        self._stack.setCurrentIndex(1)
+
+
 class MatchHistoryView(QWidget):
     """Full history screen: match list on the left, detail pane on the right."""
 
@@ -698,7 +1184,7 @@ class MatchHistoryView(QWidget):
         self._list.currentRowChanged.connect(self._on_row_changed)
         split.addWidget(self._list)
 
-        self._detail = MatchDetailView()
+        self._detail = MatchDetailView(debug_dir=self._debug_dir)
         split.addWidget(self._detail, stretch=1)
 
         root.addLayout(split, stretch=1)
@@ -767,6 +1253,9 @@ class MatchHistoryView(QWidget):
         loop so the live timeline updates without waiting for a tab switch.
         """
         if not self.isVisible():
+            return
+        # Don't clobber the race-detail page if the user is viewing one.
+        if self._detail.is_showing_race_detail:
             return
         live_id = self._live_match_id()
 
