@@ -154,9 +154,11 @@ scripts/
 - Tesseract `--psm 7` for single-line text (player cells), `--psm 6` for blocks (match settings, race results), `--psm 8` for single word
 
 ## Running
+Dependencies are managed with [uv](https://docs.astral.sh/uv/). `uv sync` creates `.venv/` and installs the project in editable mode; `uv.lock` is committed for reproducible installs.
+
 ```bash
-pip install -e .
-mktracker
+uv sync
+uv run mktracker
 ```
 
 ## GitHub
