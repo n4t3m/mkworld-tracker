@@ -29,7 +29,12 @@ from PySide6.QtWidgets import (
 from mktracker.capture.video_source import VideoCapture, enumerate_sources
 from mktracker.detection.match_settings import MatchSettings
 from mktracker.gemini_client import (
-    load_api_key, load_model, save_api_key, save_model, verify_api_key,
+    SUGGESTED_MODELS,
+    load_api_key,
+    load_model,
+    save_api_key,
+    save_model,
+    verify_api_key,
 )
 from mktracker.state_machine import GameState, GameStateMachine
 from mktracker.ui.match_history import MatchHistoryView
@@ -244,15 +249,18 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setSpacing(12)
 
-        layout.addWidget(QLabel("Gemini API Key:"))
+        # --- API key group ---------------------------------------------------
+        key_group = QGroupBox("Gemini API Key")
+        key_layout = QVBoxLayout(key_group)
+        key_layout.setSpacing(6)
 
         key_row = QHBoxLayout()
         self._api_key_edit = QLineEdit()
         self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._api_key_edit.setPlaceholderText("Paste API key here")
-        key_row.addWidget(self._api_key_edit)
+        key_row.addWidget(self._api_key_edit, 1)
 
         self._eye_btn = QPushButton("👁")
         self._eye_btn.setFixedWidth(30)
@@ -260,32 +268,48 @@ class MainWindow(QMainWindow):
         self._eye_btn.setToolTip("Show/hide API key")
         self._eye_btn.toggled.connect(self._on_toggle_key_visibility)
         key_row.addWidget(self._eye_btn)
-        layout.addLayout(key_row)
-
-        layout.addWidget(QLabel("Model:"))
-
-        self._api_model_edit = QLineEdit()
-        self._api_model_edit.setPlaceholderText("e.g. gemma-3-27b-it")
-        layout.addWidget(self._api_model_edit)
 
         save_btn = QPushButton("Save")
         save_btn.clicked.connect(self._on_save_api_key)
-        layout.addWidget(save_btn)
+        key_row.addWidget(save_btn)
 
-        verify_btn = QPushButton("Verify Key")
+        verify_btn = QPushButton("Verify")
         verify_btn.clicked.connect(self._on_verify_api_key)
-        layout.addWidget(verify_btn)
+        key_row.addWidget(verify_btn)
+
+        key_layout.addLayout(key_row)
 
         self._api_status_label = QLabel()
         self._api_status_label.setWordWrap(True)
-        layout.addWidget(self._api_status_label)
+        key_layout.addWidget(self._api_status_label)
+
+        layout.addWidget(key_group)
+
+        # --- Model group -----------------------------------------------------
+        model_group = QGroupBox("Model")
+        model_layout = QVBoxLayout(model_group)
+        model_layout.setSpacing(6)
+
+        self._api_model_combo = QComboBox()
+        self._api_model_combo.setEditable(True)
+        self._api_model_combo.addItems(SUGGESTED_MODELS)
+        self._api_model_combo.lineEdit().setPlaceholderText("e.g. gemma-4-31b-it")
+        model_layout.addWidget(self._api_model_combo)
+
+        model_hint = QLabel("Saved automatically when changed.")
+        model_hint.setStyleSheet("QLabel { color: #888; font-style: italic; }")
+        model_layout.addWidget(model_hint)
+
+        layout.addWidget(model_group)
 
         layout.addStretch()
 
         # Load stored values and auto-verify if a key exists
         stored_key = load_api_key()
         stored_model = load_model()
-        self._api_model_edit.setText(stored_model)
+        self._api_model_combo.setCurrentText(stored_model)
+        # Hook up auto-save AFTER initial population so we don't write back on load.
+        self._api_model_combo.currentTextChanged.connect(self._on_model_changed)
         if stored_key:
             self._api_key_edit.setText(stored_key)
             self._set_api_status(None, "Verifying API key...")
@@ -308,14 +332,16 @@ class MainWindow(QMainWindow):
 
     def _on_save_api_key(self) -> None:
         key = self._api_key_edit.text().strip()
-        model = self._api_model_edit.text().strip()
         if not key:
             self._set_api_status(False, "Cannot save an empty key.")
             return
         save_api_key(key)
+        self._set_api_status(None, "API key saved. Use Verify Key to check it.")
+
+    def _on_model_changed(self, model: str) -> None:
+        model = model.strip()
         if model:
             save_model(model)
-        self._set_api_status(None, "Settings saved. Use Verify Key to check the key.")
 
     def _on_toggle_key_visibility(self, checked: bool) -> None:
         mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
@@ -323,7 +349,7 @@ class MainWindow(QMainWindow):
 
     def _on_verify_api_key(self) -> None:
         key = self._api_key_edit.text().strip()
-        model = self._api_model_edit.text().strip()
+        model = self._api_model_combo.currentText().strip()
         if not key:
             self._set_api_status(False, "No API key entered.")
             return

@@ -12,8 +12,14 @@ from dotenv import dotenv_values, set_key
 _ENV_PATH = Path(".env")
 _ENV_KEY = "GEMINI_API_KEY"
 _ENV_MODEL = "GEMINI_MODEL"
-_DEFAULT_MODEL = "gemma-3-27b-it"
+_DEFAULT_MODEL = "gemma-4-31b-it"
 _BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+
+SUGGESTED_MODELS: tuple[str, ...] = (
+    "gemma-4-31b-it",
+    "gemma-3-27b-it",
+    "gemini-3.1-flash-lite-preview",
+)
 
 
 def load_api_key() -> str:
