@@ -47,6 +47,11 @@ _FINE_CONTIGUOUS_REQUIRED = 5
 # environment orange (lava, sand) often does.
 _EDGE_STRIP_MAX = 0.10
 
+# The FINISH! text lives in a bounded horizontal band (~2/3 of ROI height).
+# Tall gameplay shapes (gliders, terrain) fill nearly the entire ROI vertically.
+_ROW_DENSITY_MIN = 0.15
+_ROW_HEIGHT_RATIO_MAX = 0.80
+
 
 class RaceFinishDetector:
     """Detects the FINISH! banner displayed at the end of a race."""
@@ -111,6 +116,13 @@ class RaceFinishDetector:
         edge_right = mask[:, -fine_w:]
         if (float(np.count_nonzero(edge_left)) / edge_left.size > _EDGE_STRIP_MAX
                 or float(np.count_nonzero(edge_right)) / edge_right.size > _EDGE_STRIP_MAX):
+            return False
+
+        # Reject tall shapes (gliders, terrain) that span most of the ROI
+        # vertically. The FINISH! banner lives in a bounded horizontal band.
+        row_density = np.count_nonzero(mask, axis=1) / mask.shape[1]
+        rows_with_orange = int(np.count_nonzero(row_density >= _ROW_DENSITY_MIN))
+        if rows_with_orange > _ROW_HEIGHT_RATIO_MAX * mask.shape[0]:
             return False
 
         # The FINISH text has a red outline that gameplay orange lacks.
