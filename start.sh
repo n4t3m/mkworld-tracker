@@ -1,1 +1,1 @@
-mktracker
+uv run mktracker
