@@ -14,10 +14,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QPixmap
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
+from PySide6.QtGui import QColor, QCursor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -360,6 +361,279 @@ class _RaceCard(QFrame):
         return container
 
 
+_PIP_WIDTH = 74
+_PIP_HEIGHT = 76
+_PIP_ICON_HEIGHT = 40
+_PIP_BADGE_HEIGHT = 20
+_PIP_SPACING = 3
+
+
+def _rank_badge_style(rank: int | None) -> tuple[str, str]:
+    """Return ``(background, foreground)`` colours for a rank badge."""
+    if rank is None:
+        return ("#333", "#aaa")
+    if rank == 1:
+        return ("#fd4", "#5a3800")
+    if rank <= 4:
+        return ("#2d4", "#042")
+    if rank <= 8:
+        return ("#c93", "#3a2000")
+    return ("#c55", "#400")
+
+
+class _RacePip(QFrame):
+    """Compact overview tile for a single race: track icon + rank badge."""
+
+    clicked = Signal(int)  # race_number
+
+    def __init__(self, race: RaceRecord) -> None:
+        super().__init__()
+        self._race_number = race.race_number
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setFixedSize(_PIP_WIDTH, _PIP_HEIGHT)
+        tip_parts = [f"Race {race.race_number}", race.track_name or "Unknown track"]
+        if race.user_rank is not None:
+            tip_parts.append(f"Rank {race.user_rank}")
+        self.setToolTip("  ·  ".join(tip_parts))
+        self.setStyleSheet(
+            "_RacePip { background-color: #1a1a1a; border: 1px solid #2a2a2a;"
+            " border-radius: 6px; }"
+            " _RacePip:hover { border: 1px solid #5a7a9a;"
+            " background-color: #22262b; }"
+            " QLabel { background: transparent; border: none; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(2)
+
+        icon_label = QLabel()
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_label.setFixedHeight(_PIP_ICON_HEIGHT)
+        pixmap = _load_track_icon(race.track_name)
+        if pixmap is not None:
+            # Track icons are 16:9 — use aspect-preserving scale so they fit
+            # inside the pip width without being clipped by the label bounds.
+            scaled = pixmap.scaled(
+                _PIP_WIDTH - 8,
+                _PIP_ICON_HEIGHT,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            icon_label.setPixmap(scaled)
+        else:
+            icon_label.setText("?")
+            icon_label.setStyleSheet("QLabel { color: #555; font-size: 22px; }")
+        layout.addWidget(icon_label)
+
+        badge_text = str(race.user_rank) if race.user_rank is not None else "…"
+        bg, fg = _rank_badge_style(race.user_rank)
+        badge = QLabel(badge_text)
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setFixedHeight(_PIP_BADGE_HEIGHT)
+        badge.setStyleSheet(
+            f"QLabel {{ background-color: {bg}; color: {fg}; font-weight: bold;"
+            " font-size: 13px; border-radius: 9px; }"
+        )
+        layout.addWidget(badge)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self._race_number)
+        super().mousePressEvent(event)
+
+
+class _PendingRacePip(QFrame):
+    """Dashed placeholder pip for a race that hasn't been played yet."""
+
+    def __init__(self, race_number: int) -> None:
+        super().__init__()
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setFixedSize(_PIP_WIDTH, _PIP_HEIGHT)
+        self.setToolTip(f"Race {race_number}: not yet played")
+        self.setStyleSheet(
+            "_PendingRacePip { background-color: #15171a;"
+            " border: 1px dashed #2d2f33; border-radius: 6px; }"
+            " QLabel { background: transparent; border: none; color: #444; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(2)
+
+        icon = QLabel(str(race_number))
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setFixedHeight(_PIP_ICON_HEIGHT)
+        icon.setStyleSheet("QLabel { color: #3a3a3a; font-size: 22px; font-weight: bold; }")
+        layout.addWidget(icon)
+
+        dash = QLabel("—")
+        dash.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dash.setFixedHeight(_PIP_BADGE_HEIGHT)
+        dash.setStyleSheet("QLabel { color: #444; font-size: 13px; }")
+        layout.addWidget(dash)
+
+
+_RAIL_COLOR_PLAYED = QColor("#6a9fd4")
+_RAIL_COLOR_PENDING = QColor("#32353c")
+_RAIL_WIDTH = 3
+_PULSE_COLOR = QColor(255, 90, 90)
+
+
+def _apply_pulse(widget: QWidget) -> None:
+    """Attach an animated red drop-shadow glow to *widget*, looping forever."""
+    effect = QGraphicsDropShadowEffect(widget)
+    effect.setColor(_PULSE_COLOR)
+    effect.setOffset(0, 0)
+    effect.setBlurRadius(10)
+    widget.setGraphicsEffect(effect)
+
+    anim = QPropertyAnimation(effect, b"blurRadius", widget)
+    anim.setDuration(1400)
+    anim.setKeyValueAt(0.0, 6.0)
+    anim.setKeyValueAt(0.5, 28.0)
+    anim.setKeyValueAt(1.0, 6.0)
+    anim.setLoopCount(-1)
+    anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+    anim.start()
+
+
+class _PipTimeline(QWidget):
+    """Row of race pips with a subway-style rail painted behind them.
+
+    The rail is solid/blue through played pips and dashed/grey through
+    pending ones.  Because pip backgrounds are opaque, the rail is visible
+    in the gaps between pips — reads as "connected stops on a route".
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Leave breathing room top/bottom so the pulse glow isn't clipped by
+        # the widget's own bounds.
+        self._row = QHBoxLayout(self)
+        self._row.setContentsMargins(0, 14, 0, 14)
+        self._row.setSpacing(_PIP_SPACING)
+        self._row.addStretch()
+        self._row.addStretch()
+        self._pips: list[tuple[QWidget, bool]] = []
+
+    def add_pip(
+        self,
+        widget: QWidget,
+        *,
+        played: bool,
+        pulse: bool = False,
+    ) -> None:
+        insert_at = self._row.count() - 1  # before trailing stretch
+        self._row.insertWidget(insert_at, widget)
+        self._pips.append((widget, played))
+        if pulse:
+            _apply_pulse(widget)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        if not self._pips:
+            return
+        first_w = self._pips[0][0]
+        last_w = self._pips[-1][0]
+        # Skip until layout has assigned real geometry.
+        if first_w.width() == 0:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        y = first_w.y() + first_w.height() // 2
+        x_start = first_w.x() + first_w.width() // 2
+        x_end = last_w.x() + last_w.width() // 2
+
+        last_played_x: int | None = None
+        for widget, played in self._pips:
+            if played:
+                last_played_x = widget.x() + widget.width() // 2
+
+        if last_played_x is not None and last_played_x > x_start:
+            pen = QPen(_RAIL_COLOR_PLAYED, _RAIL_WIDTH, Qt.PenStyle.SolidLine)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawLine(x_start, y, last_played_x, y)
+
+        dash_start = last_played_x if last_played_x is not None else x_start
+        if dash_start < x_end:
+            pen = QPen(_RAIL_COLOR_PENDING, _RAIL_WIDTH, Qt.PenStyle.DashLine)
+            pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+            painter.setPen(pen)
+            painter.drawLine(dash_start, y, x_end, y)
+
+
+class _RacePipStrip(QFrame):
+    """Horizontal at-a-glance strip: one pip per race, connected by a rail.
+
+    For live matches, the "current" pip (the race in progress or the next
+    one up) pulses to draw the eye to ongoing progress.
+    """
+
+    raceSelected = Signal(int)  # race_number
+
+    def __init__(
+        self,
+        races: list[RaceRecord],
+        total_races: int,
+        *,
+        live: bool = False,
+    ) -> None:
+        super().__init__()
+        self.setStyleSheet(
+            "_RacePipStrip { background-color: #14181f;"
+            " border: 1px solid #232a33; border-radius: 6px; }"
+            " QLabel#pip_caption { color: #889; font-weight: bold;"
+            " font-size: 11px; letter-spacing: 1px; background: transparent;"
+            " border: none; }"
+        )
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setSpacing(2)
+
+        played = len(races)
+        if live:
+            caption_text = f"PROGRESS  ·  {played}/{total_races} RACES PLAYED"
+        else:
+            caption_text = (
+                f"OVERVIEW  ·  {played} RACE{'S' if played != 1 else ''}"
+            )
+        caption = QLabel(caption_text)
+        caption.setObjectName("pip_caption")
+        outer.addWidget(caption)
+
+        by_number = {r.race_number: r for r in races}
+        max_played = max(by_number.keys(), default=0)
+        total = max(total_races, max_played)
+
+        # For live matches, figure out which pip is "current" so it can pulse.
+        # The race in progress is either the most-recent played pip (if its
+        # user_rank hasn't come back yet) or the first pending pip.
+        current_n: int | None = None
+        if live:
+            last_played = by_number.get(max_played) if max_played else None
+            if last_played is not None and last_played.user_rank is None:
+                current_n = max_played
+            elif played < total:
+                current_n = played + 1
+
+        timeline = _PipTimeline()
+        for n in range(1, total + 1):
+            race = by_number.get(n)
+            is_current = live and n == current_n
+            if race is not None:
+                pip = _RacePip(race)
+                pip.clicked.connect(self.raceSelected.emit)
+                timeline.add_pip(pip, played=True, pulse=is_current)
+            else:
+                timeline.add_pip(
+                    _PendingRacePip(n), played=False, pulse=is_current,
+                )
+        outer.addWidget(timeline)
+
+
 class _LiveStatusBanner(QFrame):
     """Prominent banner shown above the live match telling the user what
     the state machine is currently doing."""
@@ -569,6 +843,11 @@ class _MatchTimelinePane(QScrollArea):
         self._layout.addWidget(header)
 
         races = sorted(record.races, key=lambda r: r.race_number)
+        if races or live:
+            strip = _RacePipStrip(races, record.settings.race_count, live=live)
+            strip.raceSelected.connect(self.raceSelected.emit)
+            self._layout.addWidget(strip)
+
         if not races and not live:
             note = QLabel("No races recorded yet.")
             note.setStyleSheet("QLabel { color: #666; font-style: italic; padding: 10px; }")
@@ -1174,7 +1453,7 @@ class MatchHistoryView(QWidget):
         split.setSpacing(8)
 
         self._list = QListWidget()
-        self._list.setFixedWidth(280)
+        self._list.setFixedWidth(230)
         self._list.setStyleSheet(
             "QListWidget { background-color: #151515; border: 1px solid #2a2a2a; }"
             " QListWidget::item { padding: 6px; border-bottom: 1px solid #222; }"
