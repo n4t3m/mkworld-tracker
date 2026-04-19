@@ -215,16 +215,37 @@ class RaceResultDetector:
         diffs = np.abs(np.diff(row_means))
         return int(np.sum(diffs > 15)) >= 8
 
+    @staticmethod
+    def _has_uniform_bar_rows(frame: np.ndarray) -> bool:
+        """Check that the result-bar column contains enough horizontally
+        uniform rows.  Result bars have solid-colour backgrounds, so many
+        rows show low horizontal pixel variation.  Gameplay scenery in the
+        same x-range varies along each row, so very few rows are uniform.
+        """
+        h, w = frame.shape[:2]
+        roi = frame[:, int(w * _ROI_X1):int(w * _ROI_X2)]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        row_std = gray.std(axis=1)
+        uniform_rows = int(np.sum(row_std < 20))
+        return uniform_rows >= int(h * 0.08)
+
     def has_race_results(self, frame: np.ndarray) -> bool:
         """Return ``True`` if the frame shows race results with ``+`` signs.
 
-        Combines ``_has_plus_clusters`` (detects ``+N`` text) with
-        ``_has_bar_transitions`` (detects result bar structure) to reject
-        gameplay frames that would otherwise cause false positives.
+        Combines three cheap checks to reject gameplay frames that would
+        otherwise cause false positives:
+
+        * ``_has_plus_clusters`` — ``+N`` text in the differential column.
+        * ``_has_bar_transitions`` — sharp row-to-row brightness steps from
+          the stacked result bars.
+        * ``_has_uniform_bar_rows`` — enough horizontally uniform rows,
+          since bar backgrounds are solid-colour while gameplay scenery
+          varies along each row.
         """
         return (
             self._has_plus_clusters(frame)
             and self._has_bar_transitions(frame)
+            and self._has_uniform_bar_rows(frame)
         )
 
     # ------------------------------------------------------------------

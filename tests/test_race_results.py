@@ -107,6 +107,12 @@ def detector():
     return RaceResultDetector()
 
 
+# ---- Gameplay negatives (must NOT be detected as race results) --------
+_NEG_DIR = os.path.join(
+    os.path.dirname(__file__), "fixtures", "race_results_negative",
+)
+
+
 def _load_frames(data_dir, filenames):
     loaded = []
     for name in filenames:
@@ -316,4 +322,32 @@ class TestDDJAccumulation:
         assert expected.lower() in actual.lower(), (
             f"placement {placement}: expected '{expected}' "
             f"in '{actual}'"
+        )
+
+
+# ------------------------------------------------------------------
+# Gameplay-frame rejection (has_race_results must return False)
+# ------------------------------------------------------------------
+
+
+class TestGameplayRejection:
+    """``has_race_results`` must reject gameplay frames that happen to
+    trigger the ``+`` cluster and bar-transition heuristics.
+
+    The fixture is a real capture where the right side of the frame
+    contained the "8th" placement indicator plus architectural scenery
+    (Mario Kart arch, track barriers) that produced enough bright
+    clusters and brightness steps in the result-bar ROI to pass both
+    previous checks.  The frame has no stacked result bars, so very
+    few rows in the ROI are horizontally uniform — which is what the
+    ``_has_uniform_bar_rows`` guard keys on.
+    """
+
+    def test_gameplay_frame_not_detected_as_results(self, detector):
+        path = os.path.join(_NEG_DIR, "gameplay_mario_kart_arch.png")
+        img = cv2.imread(path)
+        if img is None:
+            pytest.skip(f"fixture not found: {path}")
+        assert not detector.has_race_results(img), (
+            "gameplay frame incorrectly classified as race results"
         )
