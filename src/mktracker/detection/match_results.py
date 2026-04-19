@@ -103,6 +103,20 @@ _NT_BANNER_RED_SAT_MIN = 120
 _NT_BANNER_RED_VAL_MIN = 80
 _NT_BANNER_RED_RATIO_MIN = 0.30  # real screens: ~0.40; gameplay: <0.22
 
+# Two-team banner readiness check.  In team mode the banner background takes
+# the *winning* team's colour (red or blue) — and is dark grey for DRAW! —
+# so the no-teams "yellow text + red stripe" signature does not apply.
+# Instead we look at the team score boxes that sit just below the banner:
+# a saturated red panel on the left half and a saturated blue panel on the
+# right half.  These appear together with the banner regardless of which
+# team won (or even on a draw), which makes them a stable readiness signal.
+_TT_SCORES_Y1 = 0.15
+_TT_SCORES_Y2 = 0.50
+_TT_SCORES_SAT_MIN = 120
+_TT_SCORES_VAL_MIN = 80
+_TT_RED_LEFT_RATIO_MIN = 0.10   # real screens: ~0.17–0.20; gameplay: <0.10
+_TT_BLUE_RIGHT_RATIO_MIN = 0.05  # real screens: ~0.10–0.13; gameplay: <0.02
+
 
 class MatchResultDetector:
     """Detect and read final match results from the CONGRATULATIONS! screen."""
@@ -277,13 +291,21 @@ class MatchResultDetector:
         return count
 
     @staticmethod
-    def _has_result_banner(frame: np.ndarray) -> bool:
-        """Return True if the CONGRATULATIONS!/NICE TRY! banner is present.
+    def _has_result_banner(
+        frame: np.ndarray, *, teams: str = "No Teams",
+    ) -> bool:
+        """Return True if the CONGRATULATIONS!/NICE TRY!/DRAW! banner is
+        present.
 
-        Requires both yellow text pixels AND a red/orange diagonal stripe.
-        Gameplay frames may have incidental yellow (golden tracks, UI badges)
-        but never the accompanying red stripe.
+        In ``No Teams`` mode the banner has yellow text on a red/orange
+        diagonal stripe.  In ``Two Teams`` mode the banner background
+        instead takes the *winning* team's colour (red or blue), or is
+        dark grey on a draw, with white text — so the no-teams signature
+        does not match.  For team mode we delegate to the team-specific
+        check that looks at the red/blue team-score panels below the banner.
         """
+        if teams == "Two Teams":
+            return MatchResultDetector._has_two_team_result_banner(frame)
         h, w = frame.shape[:2]
         banner = frame[:int(h * _NT_BANNER_Y2), :int(w * _NT_BANNER_X2)]
         hsv = cv2.cvtColor(banner, cv2.COLOR_BGR2HSV)
@@ -301,6 +323,39 @@ class MatchResultDetector:
             & (hsv[:, :, 2] > _NT_BANNER_RED_VAL_MIN)
         )
         return float(red_mask.mean()) >= _NT_BANNER_RED_RATIO_MIN
+
+    @staticmethod
+    def _has_two_team_result_banner(frame: np.ndarray) -> bool:
+        """Return True if the two-team CONGRATULATIONS!/NICE TRY!/DRAW!
+        screen is showing.
+
+        The banner colour itself varies (red/blue for the winning team,
+        dark grey for a draw), so we instead detect the giant team-score
+        panels that appear together with the banner — a saturated red
+        panel on the left half and a saturated blue panel on the right
+        half of the area just below the banner.
+        """
+        h, w = frame.shape[:2]
+        region = frame[int(h * _TT_SCORES_Y1):int(h * _TT_SCORES_Y2), :]
+        rh, rw = region.shape[:2]
+        left = region[:, : rw // 2]
+        right = region[:, rw // 2:]
+        hsv_l = cv2.cvtColor(left, cv2.COLOR_BGR2HSV)
+        hsv_r = cv2.cvtColor(right, cv2.COLOR_BGR2HSV)
+        red_mask = (
+            ((hsv_l[:, :, 0] < 15) | (hsv_l[:, :, 0] > 160))
+            & (hsv_l[:, :, 1] > _TT_SCORES_SAT_MIN)
+            & (hsv_l[:, :, 2] > _TT_SCORES_VAL_MIN)
+        )
+        blue_mask = (
+            (hsv_r[:, :, 0] >= 90) & (hsv_r[:, :, 0] <= 130)
+            & (hsv_r[:, :, 1] > _TT_SCORES_SAT_MIN)
+            & (hsv_r[:, :, 2] > _TT_SCORES_VAL_MIN)
+        )
+        return (
+            float(red_mask.mean()) >= _TT_RED_LEFT_RATIO_MIN
+            and float(blue_mask.mean()) >= _TT_BLUE_RIGHT_RATIO_MIN
+        )
 
     # ------------------------------------------------------------------
     # Column OCR

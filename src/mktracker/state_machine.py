@@ -493,7 +493,8 @@ class GameStateMachine:
     def _handle_finalizing_match_gemini(self, frame: np.ndarray) -> None:
         """Two-phase detection: spot the banner first, then wait 1s for
         results to load before capturing the frame for Gemini."""
-        if not self._match_result_detector._has_result_banner(frame):
+        teams = self._match_settings.teams if self._match_settings else "No Teams"
+        if not self._match_result_detector._has_result_banner(frame, teams=teams):
             return
 
         if self._match_banner_seen_at is None:

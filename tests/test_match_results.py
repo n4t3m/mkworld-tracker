@@ -108,3 +108,45 @@ def test_rejects_two_teams_screen_on_no_teams_path():
     frame = _load("twoteams_result.png")
     result = _detector.detect(frame, teams="No Teams", player_count=12)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Two-teams banner readiness — Gemini path uses _has_result_banner directly.
+# In team mode the banner background is the winning team's colour (red or
+# blue) with white text — not the no-teams "yellow text on red stripe" — so
+# the readiness check must dispatch to a team-specific detector.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "twoteams_banner_red_win.png",   # CONGRATULATIONS!, red team won (red banner)
+        "twoteams_banner_blue_win.png",  # CONGRATULATIONS!, blue team won (blue banner)
+        "twoteams_result.png",           # CONGRATULATIONS!, two teams
+        "20260329_174714.png",           # CONGRATULATIONS!, two teams
+        "20260329_174922.png",           # CONGRATULATIONS!, two teams
+        "20260329_163426.png",           # DRAW!, two teams (dark banner)
+    ],
+)
+def test_two_teams_banner_detected(filename):
+    frame = _load(filename)
+    assert _detector._has_result_banner(frame, teams="Two Teams"), (
+        f"Expected two-team banner to be detected on {filename}"
+    )
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "20260329_131323.png",   # Pure gameplay — golden temple
+        "20260329_144018.png",   # Pure gameplay — yellow "1st" badge
+        "12presultscreen.png",   # No-teams result screen — wrong layout
+        "nicetryvariant.png",    # No-teams result screen — wrong layout
+        "20260329_162559.png",   # No-teams 24-player result screen
+    ],
+)
+def test_two_teams_banner_rejects_non_team_screens(filename):
+    frame = _load(filename)
+    assert not _detector._has_result_banner(frame, teams="Two Teams"), (
+        f"Two-team banner check should reject {filename}"
+    )
