@@ -334,20 +334,30 @@ class TestGameplayRejection:
     """``has_race_results`` must reject gameplay frames that happen to
     trigger the ``+`` cluster and bar-transition heuristics.
 
-    The fixture is a real capture where the right side of the frame
-    contained the "8th" placement indicator plus architectural scenery
-    (Mario Kart arch, track barriers) that produced enough bright
-    clusters and brightness steps in the result-bar ROI to pass both
-    previous checks.  The frame has no stacked result bars, so very
-    few rows in the ROI are horizontally uniform — which is what the
-    ``_has_uniform_bar_rows`` guard keys on.
+    ``gameplay_mario_kart_arch.png`` — a capture where the right side of
+    the frame contained the "8th" placement indicator plus architectural
+    scenery (Mario Kart arch, track barriers) that produced enough
+    bright clusters and brightness steps in the result-bar ROI to pass
+    the count and transition checks.  The frame has no stacked result
+    bars, so very few rows in the ROI are horizontally uniform — caught
+    by ``_has_uniform_bar_rows``.
+
+    ``gameplay_daisy_rank_badge.png`` — a capture where pink sky and
+    stone walls produced many uniform rows, and the "2nd" rank badge
+    plus scenery produced enough bright clusters and transitions to
+    pass the other three checks.  The cluster y-positions are
+    irregular, so the ``_plus_clusters_on_grid`` guard rejects it.
     """
 
-    def test_gameplay_frame_not_detected_as_results(self, detector):
-        path = os.path.join(_NEG_DIR, "gameplay_mario_kart_arch.png")
+    @pytest.mark.parametrize("fixture", [
+        "gameplay_mario_kart_arch.png",
+        "gameplay_daisy_rank_badge.png",
+    ])
+    def test_gameplay_frame_not_detected_as_results(self, detector, fixture):
+        path = os.path.join(_NEG_DIR, fixture)
         img = cv2.imread(path)
         if img is None:
             pytest.skip(f"fixture not found: {path}")
         assert not detector.has_race_results(img), (
-            "gameplay frame incorrectly classified as race results"
+            f"gameplay frame {fixture} incorrectly classified as race results"
         )

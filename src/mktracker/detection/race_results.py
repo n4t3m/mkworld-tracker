@@ -46,6 +46,11 @@ _PLUS_STRIP_X1 = 0.84
 _PLUS_STRIP_X2 = 0.90
 _PLUS_MIN_CLUSTERS = 3
 
+# Result bars are ~77px tall on a 1080p frame — use this to check that
+# the ``+N`` clusters lie on a regular vertical grid.
+_ROW_SPACING_FRACTION = 77 / 1080
+_PLUS_GRID_MIN_RATIO = 0.6
+
 
 class RaceResultDetector:
     """Detects race-result rows and reads placement / name data."""
@@ -169,14 +174,8 @@ class RaceResultDetector:
         return binary
 
     @staticmethod
-    def _has_plus_clusters(frame: np.ndarray) -> bool:
-        """Detect ``+N`` text in the plus column via adaptive-V clusters.
-
-        Works for both team and non-team frames.  The ``+`` column is a
-        narrow vertical strip; each ``+N`` creates a bright cluster in
-        the adaptive-threshold output.  Three or more clusters indicate
-        race results.
-        """
+    def _plus_cluster_starts(frame: np.ndarray) -> list[int]:
+        """Return y-coordinates of ``+N`` clusters in the plus column."""
         h, w = frame.shape[:2]
         strip = frame[:, int(w * _PLUS_STRIP_X1):int(w * _PLUS_STRIP_X2)]
         v = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)[:, :, 2]
@@ -186,7 +185,7 @@ class RaceResultDetector:
         )
         bright_per_row = binary.mean(axis=1)
 
-        clusters = 0
+        starts: list[int] = []
         in_cluster = False
         cluster_start = 0
         for y in range(h):
@@ -195,12 +194,48 @@ class RaceResultDetector:
                 in_cluster = True
             elif bright_per_row[y] <= 30 and in_cluster:
                 if y - cluster_start >= 8:
-                    clusters += 1
+                    starts.append(cluster_start)
                 in_cluster = False
         if in_cluster and h - cluster_start >= 8:
-            clusters += 1
+            starts.append(cluster_start)
+        return starts
 
-        return clusters >= _PLUS_MIN_CLUSTERS
+    @classmethod
+    def _has_plus_clusters(cls, frame: np.ndarray) -> bool:
+        """Detect ``+N`` text in the plus column via adaptive-V clusters.
+
+        Works for both team and non-team frames.  The ``+`` column is a
+        narrow vertical strip; each ``+N`` creates a bright cluster in
+        the adaptive-threshold output.  Three or more clusters indicate
+        race results.
+        """
+        return len(cls._plus_cluster_starts(frame)) >= _PLUS_MIN_CLUSTERS
+
+    @staticmethod
+    def _plus_clusters_on_grid(starts: list[int], frame_h: int) -> int:
+        """Count cluster starts that fit a regular vertical grid.
+
+        Race results place one ``+N`` cluster per row, so cluster y
+        positions lie on a periodic grid with period ≈ one row height
+        (~77px on 1080p).  Gameplay frames produce clusters at
+        irregular y positions (scenery, HUD, rank badge), so only a
+        small fraction fit any common grid.
+        """
+        if len(starts) < _PLUS_MIN_CLUSTERS:
+            return 0
+        period = frame_h * _ROW_SPACING_FRACTION
+        tolerance = max(8.0, period * 0.13)
+        best_count = 0
+        for base in starts:
+            count = 0
+            for s in starts:
+                d = abs(s - base) % period
+                d = min(d, period - d)
+                if d <= tolerance:
+                    count += 1
+            if count > best_count:
+                best_count = count
+        return best_count
 
     @staticmethod
     def _has_bar_transitions(frame: np.ndarray) -> bool:
@@ -232,19 +267,31 @@ class RaceResultDetector:
     def has_race_results(self, frame: np.ndarray) -> bool:
         """Return ``True`` if the frame shows race results with ``+`` signs.
 
-        Combines three cheap checks to reject gameplay frames that would
+        Combines four cheap checks to reject gameplay frames that would
         otherwise cause false positives:
 
-        * ``_has_plus_clusters`` — ``+N`` text in the differential column.
-        * ``_has_bar_transitions`` — sharp row-to-row brightness steps from
-          the stacked result bars.
+        * ``_plus_cluster_starts`` / ``_plus_clusters_on_grid`` — enough
+          ``+N`` clusters in the differential column, AND most of them
+          lie on a regular ~one-row-height grid.  Gameplay produces many
+          clusters at irregular positions (scenery, HUD, rank badge)
+          that fail the grid check even when the count passes.
+        * ``_has_bar_transitions`` — sharp row-to-row brightness steps
+          from the stacked result bars.
         * ``_has_uniform_bar_rows`` — enough horizontally uniform rows,
           since bar backgrounds are solid-colour while gameplay scenery
           varies along each row.
         """
+        starts = self._plus_cluster_starts(frame)
+        if len(starts) < _PLUS_MIN_CLUSTERS:
+            return False
+        on_grid = self._plus_clusters_on_grid(starts, frame.shape[0])
+        if (
+            on_grid < _PLUS_MIN_CLUSTERS
+            or on_grid / len(starts) < _PLUS_GRID_MIN_RATIO
+        ):
+            return False
         return (
-            self._has_plus_clusters(frame)
-            and self._has_bar_transitions(frame)
+            self._has_bar_transitions(frame)
             and self._has_uniform_bar_rows(frame)
         )
 
