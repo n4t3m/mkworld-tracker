@@ -27,20 +27,19 @@ logger = logging.getLogger(__name__)
 _BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 _PROMPT = (
-    "This is a cropped image from the bottom-right corner of a Mario Kart gameplay screen. "
-    "It may show a race placement rank indicator (e.g. '1st', '2nd', '12th', '24th'). "
-    "The rank is displayed as a large styled number with an ordinal suffix "
-    "(st, nd, rd, or th) in a bold italic 3D font with a dark outline. "
-    "The text colour varies: yellow/lime for 1st, blue-white for 2nd, "
-    "red/salmon for 3rd, and orange for 4th through 24th. "
-    "Read the placement number from the image. "
-    "Return ONLY a raw JSON object with no markdown formatting, "
-    "no code fences, and no extra text. Use exactly this structure:\n"
-    '{"rank": <number>}\n'
-    "where <number> is the integer placement (1-24). "
-    "If no rank indicator is visible, return:\n"
-    '{"rank": null}'
+    "This is a cropped image from the bottom-right of a Mario Kart gameplay screen. "
+    "It may show a race placement rank indicator (e.g. 1st, 2nd, 12th, 24th) — a large "
+    "styled number with an ordinal suffix (st, nd, rd, th) in a bold italic 3D font with "
+    "a dark outline. Text colour varies: yellow/lime for 1st, blue-white for 2nd, "
+    "red/salmon for 3rd, orange for 4th-24th. "
+    "Return the integer placement (1-24) the image shows, or null if no rank indicator is visible."
 )
+
+_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {"rank": {"type": "integer", "nullable": True}},
+    "required": ["rank"],
+}
 
 
 def _encode_frame(frame: np.ndarray) -> str:
@@ -68,7 +67,12 @@ def _query_gemini(image_b64: str, api_key: str, model: str) -> str:
                     {"text": _PROMPT},
                 ]
             }
-        ]
+        ],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "application/json",
+            "responseSchema": _RESPONSE_SCHEMA,
+        },
     }
 
     data = json.dumps(payload).encode("utf-8")
@@ -79,7 +83,7 @@ def _query_gemini(image_b64: str, api_key: str, model: str) -> str:
         method="POST",
     )
 
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=180) as resp:
         result = json.loads(resp.read().decode("utf-8"))
 
     text = result["candidates"][0]["content"]["parts"][0]["text"]
