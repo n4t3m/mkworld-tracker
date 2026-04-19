@@ -2,8 +2,9 @@
 
 Shows a list of previously played matches (loaded from ``debug_frames/``) on
 the left and a scrollable per-race timeline on the right.  The detail widget
-accepts any :class:`MatchRecord`, so it can also be reused in the future to
-display the currently-running match.
+accepts any :class:`MatchRecord`, so it is also used to display the
+currently-running match — the state machine writes ``match.json`` after every
+update, so the on-disk record is always live.
 """
 
 from __future__ import annotations
@@ -11,9 +12,10 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -30,6 +32,7 @@ from PySide6.QtWidgets import (
 from mktracker.detection.tracks import TRACK_ICONS_DIR, TRACK_IMAGES
 from mktracker.match_record import (
     DEFAULT_DEBUG_DIR,
+    MATCH_FILE,
     FinalStandings,
     MatchRecord,
     RaceRecord,
@@ -37,10 +40,26 @@ from mktracker.match_record import (
     list_matches,
 )
 
+if TYPE_CHECKING:
+    from mktracker.state_machine import GameStateMachine
+
 logger = logging.getLogger(__name__)
 
 _ICON_SIZE = 96
 _ICON_CACHE: dict[str, QPixmap] = {}
+
+# Human-readable description of what the state machine is currently doing.
+# Used to render the live status banner in the detail view.  Keyed by
+# ``GameState.name`` (string) so this module doesn't import the enum.
+_LIVE_STATUS_TEXT: dict[str, str] = {
+    "MATCH_STARTED": "Match starting…",
+    "WAITING_FOR_TRACK_PICK": "Waiting for track selection",
+    "READING_PLAYERS_IN_RACE": "Reading player names",
+    "WAITING_FOR_RACE_END": "Race in progress — waiting for FINISH",
+    "DETECTING_RACE_RANK": "Detecting your placement",
+    "READING_RACE_RESULTS": "Reading race results",
+    "FINALIZING_MATCH": "Reading final standings",
+}
 
 
 def _load_track_icon(track_name: str | None) -> QPixmap | None:
@@ -72,11 +91,15 @@ def _format_timestamp(iso: str | None) -> str:
         return iso
 
 
-def _summary_line(record: MatchRecord) -> str:
+def _summary_line(record: MatchRecord, *, live: bool = False) -> str:
     s = record.settings
-    race_count = len(record.races) or s.race_count
-    parts = [s.cc_class, f"{race_count} races", s.teams]
-    if record.final_standings is None and record.completed_at is None:
+    if live:
+        progress = f"{len(record.races)}/{s.race_count} races"
+    else:
+        race_count = len(record.races) or s.race_count
+        progress = f"{race_count} races"
+    parts = [s.cc_class, progress, s.teams]
+    if not live and record.final_standings is None and record.completed_at is None:
         parts.append("partial")
     return " · ".join(parts)
 
@@ -84,8 +107,9 @@ def _summary_line(record: MatchRecord) -> str:
 class _RaceCard(QFrame):
     """One race in the timeline: icon + track name + placements."""
 
-    def __init__(self, race: RaceRecord) -> None:
+    def __init__(self, race: RaceRecord, *, live: bool = False) -> None:
         super().__init__()
+        self._live = live
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet(
             "_RaceCard { background-color: #1a1a1a; border: 1px solid #2a2a2a;"
@@ -139,6 +163,14 @@ class _RaceCard(QFrame):
                 " padding: 2px 8px; border-radius: 10px; }"
             )
             title_row.addWidget(badge)
+        elif self._live:
+            badge = QLabel("Rank …")
+            badge.setStyleSheet(
+                "QLabel { background-color: #333; color: #aaa; font-style: italic;"
+                " padding: 2px 8px; border-radius: 10px; }"
+            )
+            badge.setToolTip("Awaiting Gemini rank result")
+            title_row.addWidget(badge)
 
         mid.addLayout(title_row)
 
@@ -153,8 +185,12 @@ class _RaceCard(QFrame):
             return self._build_team_placements(race.teams)
         if race.placements:
             return self._build_solo_placements(race)
-        note = QLabel("No placements recorded.")
-        note.setStyleSheet("QLabel { color: #666; font-style: italic; }")
+        if self._live:
+            note = QLabel("Awaiting placements…")
+            note.setStyleSheet("QLabel { color: #c93; font-style: italic; }")
+        else:
+            note = QLabel("No placements recorded.")
+            note.setStyleSheet("QLabel { color: #666; font-style: italic; }")
         return note
 
     def _build_solo_placements(self, race: RaceRecord) -> QWidget:
@@ -191,6 +227,108 @@ class _RaceCard(QFrame):
                 row.setStyleSheet("QLabel { color: #ccc; font-family: Consolas, monospace; }")
                 layout.addWidget(row)
         return container
+
+
+class _LiveStatusBanner(QFrame):
+    """Prominent banner shown above the live match telling the user what
+    the state machine is currently doing."""
+
+    def __init__(self, status_text: str, race_progress: str | None) -> None:
+        super().__init__()
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet(
+            "_LiveStatusBanner { background-color: #3a1414;"
+            " border: 2px solid #c33; border-radius: 6px; }"
+            " QLabel { color: #fee; }"
+        )
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(12)
+
+        dot = QLabel("●")
+        dot.setStyleSheet(
+            "QLabel { color: #f55; font-size: 20px; font-weight: bold; }"
+        )
+        layout.addWidget(dot)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(0)
+        title = QLabel("LIVE MATCH IN PROGRESS")
+        title.setStyleSheet(
+            "QLabel { color: #fff; font-size: 13px; font-weight: bold;"
+            " letter-spacing: 1px; }"
+        )
+        text_col.addWidget(title)
+
+        sub_parts = [status_text]
+        if race_progress:
+            sub_parts.insert(0, race_progress)
+        sub = QLabel("  ·  ".join(sub_parts))
+        sub.setStyleSheet("QLabel { color: #fcc; font-size: 13px; }")
+        text_col.addWidget(sub)
+        layout.addLayout(text_col, stretch=1)
+
+
+class _PendingRaceCard(QFrame):
+    """Placeholder card for a race that hasn't been played yet."""
+
+    def __init__(self, race_number: int) -> None:
+        super().__init__()
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet(
+            "_PendingRaceCard { background-color: #15171a;"
+            " border: 1px dashed #2d2f33; border-radius: 6px; }"
+            " QLabel { color: #777; }"
+        )
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(12)
+
+        icon = QLabel("?")
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setFixedSize(_ICON_SIZE, _ICON_SIZE)
+        icon.setStyleSheet(
+            "QLabel { background-color: #0e0e0e; border-radius: 4px;"
+            " color: #444; font-size: 32px; }"
+        )
+        layout.addWidget(icon, alignment=Qt.AlignmentFlag.AlignTop)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(4)
+        title = QLabel(f"Race {race_number}")
+        title.setStyleSheet(
+            "QLabel { font-weight: bold; font-size: 14px; color: #667; }"
+        )
+        text_col.addWidget(title)
+        sub = QLabel("Pending — race not yet played")
+        sub.setStyleSheet("QLabel { color: #666; font-style: italic; }")
+        text_col.addWidget(sub)
+        text_col.addStretch()
+        layout.addLayout(text_col, stretch=1)
+
+
+class _PendingFinalStandingsCard(QFrame):
+    """Placeholder shown while the live match has no final standings yet."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet(
+            "_PendingFinalStandingsCard { background-color: #1a1a1f;"
+            " border: 1px dashed #3a3a4a; border-radius: 6px; }"
+            " QLabel { color: #aab; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(2)
+        title = QLabel("Final Standings")
+        title.setStyleSheet(
+            "QLabel { font-size: 15px; font-weight: bold; color: #889; }"
+        )
+        layout.addWidget(title)
+        sub = QLabel("Awaiting final results — match still in progress.")
+        sub.setStyleSheet("QLabel { color: #778; font-style: italic; }")
+        layout.addWidget(sub)
 
 
 class _FinalStandingsCard(QFrame):
@@ -279,44 +417,90 @@ class MatchDetailView(QScrollArea):
     def clear(self) -> None:
         self._show_empty()
 
-    def set_record(self, record: MatchRecord) -> None:
+    def set_record(
+        self,
+        record: MatchRecord,
+        *,
+        live: bool = False,
+        live_status: str | None = None,
+    ) -> None:
         self._clear()
 
-        header = self._build_header(record)
+        if live:
+            races_played = len(record.races)
+            total = max(record.settings.race_count, races_played)
+            progress = f"Race {min(races_played + 1, total)} of {total}"
+            status_text = live_status or "Live"
+            self._layout.addWidget(_LiveStatusBanner(status_text, progress))
+
+        header = self._build_header(record, live=live)
         self._layout.addWidget(header)
 
-        if not record.races:
+        races = sorted(record.races, key=lambda r: r.race_number)
+        if not races and not live:
             note = QLabel("No races recorded yet.")
             note.setStyleSheet("QLabel { color: #666; font-style: italic; padding: 10px; }")
             self._layout.addWidget(note)
         else:
-            for race in sorted(record.races, key=lambda r: r.race_number):
-                self._layout.addWidget(_RaceCard(race))
+            for race in races:
+                self._layout.addWidget(_RaceCard(race, live=live))
+
+        if live:
+            played = max((r.race_number for r in races), default=0)
+            total = max(record.settings.race_count, played)
+            for n in range(played + 1, total + 1):
+                self._layout.addWidget(_PendingRaceCard(n))
 
         if record.final_standings is not None:
             self._layout.addWidget(_FinalStandingsCard(record.final_standings))
+        elif live:
+            self._layout.addWidget(_PendingFinalStandingsCard())
 
         self._layout.addStretch()
 
-    def _build_header(self, record: MatchRecord) -> QWidget:
+    def _build_header(self, record: MatchRecord, *, live: bool = False) -> QWidget:
         frame = QFrame()
-        frame.setStyleSheet(
-            "QFrame { background-color: #14181f; border: 1px solid #232a33;"
-            " border-radius: 6px; }"
-            " QLabel { color: #ddd; }"
-        )
+        if live:
+            frame.setStyleSheet(
+                "QFrame { background-color: #1f1418; border: 2px solid #c33;"
+                " border-radius: 6px; }"
+                " QLabel { color: #ddd; }"
+            )
+        else:
+            frame.setStyleSheet(
+                "QFrame { background-color: #14181f; border: 1px solid #232a33;"
+                " border-radius: 6px; }"
+                " QLabel { color: #ddd; }"
+            )
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(2)
 
-        started = _format_timestamp(record.started_at)
-        completed = _format_timestamp(record.completed_at)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        if live:
+            badge = QLabel("● LIVE")
+            badge.setStyleSheet(
+                "QLabel { background-color: #c33; color: #fff; font-weight: bold;"
+                " padding: 4px 12px; border-radius: 12px; font-size: 14px;"
+                " letter-spacing: 1px; }"
+            )
+            badge.setToolTip("This match is currently in progress")
+            title_row.addWidget(badge)
         title = QLabel(f"Match {record.match_id}")
         title.setStyleSheet("QLabel { font-size: 16px; font-weight: bold; color: #fff; }")
-        layout.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        layout.addLayout(title_row)
 
-        when = QLabel(f"Started: {started}    Completed: {completed}")
-        when.setStyleSheet("QLabel { color: #889; }")
+        started = _format_timestamp(record.started_at)
+        if live:
+            when = QLabel(f"Started: {started}    Status: in progress")
+            when.setStyleSheet("QLabel { color: #fcc; }")
+        else:
+            completed = _format_timestamp(record.completed_at)
+            when = QLabel(f"Started: {started}    Completed: {completed}")
+            when.setStyleSheet("QLabel { color: #889; }")
         layout.addWidget(when)
 
         s = record.settings
@@ -337,10 +521,26 @@ class MatchHistoryView(QWidget):
 
     backRequested = Signal()
 
-    def __init__(self, debug_dir: Path = DEFAULT_DEBUG_DIR) -> None:
+    def __init__(
+        self,
+        debug_dir: Path = DEFAULT_DEBUG_DIR,
+        state_machine: "GameStateMachine | None" = None,
+    ) -> None:
         super().__init__()
         self._debug_dir = debug_dir
+        self._state_machine = state_machine
         self._records: list[MatchRecord] = []
+        # Tracks the live match id we showed on the most recent tick(); used
+        # to detect match-start / match-end transitions and rebuild the list.
+        self._last_live_match_id: str | None = None
+        # mtime of the live match's match.json the last time we re-rendered
+        # the detail pane.  Used to skip redundant rebuilds (tick fires at
+        # ~30fps; the file only changes when state machine writes).
+        self._last_live_mtime: float = 0.0
+        # The live status string we last rendered.  Lets the status banner
+        # update on state changes that don't trigger a match.json write
+        # (e.g. transitioning into WAITING_FOR_RACE_END).
+        self._last_live_status: str | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -381,6 +581,20 @@ class MatchHistoryView(QWidget):
 
         root.addLayout(split, stretch=1)
 
+    def _live_match_id(self) -> str | None:
+        sm = self._state_machine
+        if sm is None or not sm.is_match_active:
+            return None
+        return sm.current_match_id
+
+    def _live_status_text(self) -> str | None:
+        """Human-readable description of what the state machine is doing,
+        or ``None`` if no match is active."""
+        sm = self._state_machine
+        if sm is None or not sm.is_match_active:
+            return None
+        return _LIVE_STATUS_TEXT.get(sm.state.name, sm.state.name)
+
     def refresh(self) -> None:
         """Re-scan ``debug_dir`` and rebuild the match list."""
         previous_id = None
@@ -389,11 +603,22 @@ class MatchHistoryView(QWidget):
             previous_id = self._records[current_row].match_id
 
         self._records = list_matches(self._debug_dir)
+        live_id = self._live_match_id()
+        self._last_live_match_id = live_id
+        self._last_live_mtime = 0.0
+        self._last_live_status = None
+
         self._list.clear()
         for rec in self._records:
             started = _format_timestamp(rec.started_at)
-            summary = _summary_line(rec)
-            item = QListWidgetItem(f"{started}\n{summary}")
+            is_live = rec.match_id == live_id
+            summary = _summary_line(rec, live=is_live)
+            prefix = "●  LIVE\n" if is_live else ""
+            item = QListWidgetItem(f"{prefix}{started}\n{summary}")
+            if is_live:
+                item.setBackground(QColor("#3a1414"))
+                item.setForeground(QColor("#fff"))
+                item.setToolTip("This match is currently in progress")
             self._list.addItem(item)
 
         self._count_label.setText(
@@ -413,8 +638,66 @@ class MatchHistoryView(QWidget):
                     break
         self._list.setCurrentRow(target_row)
 
+    def tick(self) -> None:
+        """Re-render the live match if it's currently selected.
+
+        Cheap when nothing has changed.  Called from the main window's frame
+        loop so the live timeline updates without waiting for a tab switch.
+        """
+        if not self.isVisible():
+            return
+        live_id = self._live_match_id()
+
+        # Match started or ended since the last tick — rebuild the list so
+        # the LIVE badge appears/disappears in the right place.
+        if live_id != self._last_live_match_id:
+            logger.info(
+                "Live match changed: %s -> %s (rebuilding list)",
+                self._last_live_match_id, live_id,
+            )
+            self.refresh()
+            return
+
+        # Same live match still in progress.  If it's the selected row,
+        # re-load it from disk (the state machine writes match.json on every
+        # update) and re-render the detail pane — but only when match.json
+        # has actually changed OR when the state machine has stepped into a
+        # new state (so the status banner updates between disk writes).
+        if live_id is None:
+            return
+        current_row = self._list.currentRow()
+        if not (0 <= current_row < len(self._records)):
+            return
+        if self._records[current_row].match_id != live_id:
+            return
+        match_path = self._debug_dir / live_id / MATCH_FILE
+        try:
+            mtime = match_path.stat().st_mtime
+        except OSError:
+            return
+        live_status = self._live_status_text()
+        if mtime == self._last_live_mtime and live_status == self._last_live_status:
+            return
+        try:
+            record = MatchRecord.load(self._debug_dir / live_id)
+        except (OSError, ValueError, KeyError):
+            return
+        self._last_live_mtime = mtime
+        self._last_live_status = live_status
+        self._records[current_row] = record
+        self._detail.set_record(record, live=True, live_status=live_status)
+        logger.debug(
+            "Live match %s re-rendered (status: %s, races: %d)",
+            live_id, live_status, len(record.races),
+        )
+
     def _on_row_changed(self, row: int) -> None:
+        self._last_live_mtime = 0.0
+        self._last_live_status = None
         if 0 <= row < len(self._records):
-            self._detail.set_record(self._records[row])
+            rec = self._records[row]
+            is_live = rec.match_id == self._live_match_id()
+            live_status = self._live_status_text() if is_live else None
+            self._detail.set_record(rec, live=is_live, live_status=live_status)
         else:
             self._detail.clear()

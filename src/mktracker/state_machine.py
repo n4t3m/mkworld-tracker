@@ -127,6 +127,21 @@ class GameStateMachine:
         return self._current_race
 
     @property
+    def current_match_id(self) -> str | None:
+        """ID of the currently-tracked match (its on-disk folder name), or
+        ``None`` if no match folder has been created yet."""
+        return self._match_dir.name if self._match_dir is not None else None
+
+    @property
+    def is_match_active(self) -> bool:
+        """``True`` while a match is in progress (between leaving
+        ``WAITING_FOR_MATCH`` and returning to it)."""
+        return (
+            self._state is not GameState.WAITING_FOR_MATCH
+            and self._match_started_at is not None
+        )
+
+    @property
     def player_count(self) -> int | None:
         """Number of players in the most recent race, or ``None`` if unknown."""
         if self._races:

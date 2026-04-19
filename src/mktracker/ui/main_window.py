@@ -91,7 +91,7 @@ class MainWindow(QMainWindow):
         # --- top-level tabs: Live View / Match History / Settings ---
         self._main_tabs = QTabWidget()
         self._main_tabs.addTab(self._build_live_view(), "Live View")
-        self._history_view = MatchHistoryView()
+        self._history_view = MatchHistoryView(state_machine=self._state_machine)
         self._main_tabs.addTab(self._history_view, "Match History")
         self._main_tabs.addTab(self._build_api_settings_panel(), "Settings")
         self._main_tabs.currentChanged.connect(self._on_tab_changed)
@@ -482,8 +482,10 @@ class MainWindow(QMainWindow):
                     "QLabel { color: #4a4; font-weight: bold; margin-top: 4px; }"
                 )
 
-        # Skip the expensive scale/paint when the history tab is showing.
+        # Skip the expensive scale/paint when the history tab is showing —
+        # but tick the history view so the live match timeline refreshes.
         if self._main_tabs.currentWidget() is self._history_view:
+            self._history_view.tick()
             return
 
         # Convert BGR -> RGB then to QImage
