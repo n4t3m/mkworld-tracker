@@ -28,33 +28,53 @@ logger = logging.getLogger(__name__)
 _BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 _PROMPT = (
-    "This is a Mario Kart World results screen. "
-    "Determine whether the match used no teams, two teams, three teams, or four teams. "
-    "If players are sorted into separate columns by color, each column represents one team. "
-    "Players on the same team often share a common tag — a short prefix or suffix in their name (e.g. '[ABC]' or '|XYZ'). "
-    "Return ONLY a raw JSON object with no markdown formatting, no code fences, and no extra text. Use exactly this structure:\n"
-    "{\n"
-    '  "mode": "no_teams" | "two_teams" | "three_teams" | "four_teams",\n'
-    '  "teams": [\n'
-    "    {\n"
-    '      "name": "Red Team",\n'
-    '      "points": 42,\n'
-    '      "winner": true,\n'
-    '      "players": [\n'
-    '        { "place": 1, "name": "PlayerA", "score": 100 }\n'
-    "      ]\n"
-    "    }\n"
-    "  ]\n"
-    "}\n"
-    "For no_teams mode, use a single entry in 'teams' with name, points, and winner all set to null. "
-    "When teams are present, 'points' is the team's total point tally shown on screen, and 'winner' is true for the team with the highest points (false for all others). "
-    "Every player must appear exactly once with their final placement number, display name, and total score. "
-    "CRITICAL: If no player result bars are visible in the image — for example, if only the banner text "
-    "(CONGRATULATIONS! or NICE TRY!) is shown with confetti but no player names or scores have loaded yet — "
-    "you MUST return {\"mode\": \"no_teams\", \"teams\": []} with an empty teams array. "
-    "Do NOT hallucinate or invent player names, scores, or placements. Only report data you can actually read from the image. "
-    "VALID JSON RESPONSE ONLY. VALID JSON RESPONSE ONLY. VALID JSON RESPONSE ONLY. DO NOT GIVE ME MARKDOWN. DO NOT DARE GIVE ME MARKDOWN"
+    "Analyse this Mario Kart World results screen and return the structured results. "
+    "Determine the team mode based on whether players are split into coloured columns "
+    "(no_teams, two_teams, three_teams, or four_teams). Players on the same team often "
+    "share a common tag — a short prefix or suffix in their name (e.g. '[ABC]' or '|XYZ'). "
+    "For each team give its displayed total points, whether it won (winner=true for the "
+    "team with the highest points, false otherwise), and every player with their final "
+    "OVERALL placement (1..N across ALL players, not per-team), display name, and score. "
+    "For no_teams mode, return a single team with name, points, and winner all set to null. "
+    "If no player result bars are visible (only the CONGRATULATIONS! or NICE TRY! banner "
+    "with confetti and no player names loaded), return an empty teams array. "
+    "Do NOT invent player names, scores, or placements — only report what you can read."
 )
+
+_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "mode": {
+            "type": "string",
+            "enum": ["no_teams", "two_teams", "three_teams", "four_teams"],
+        },
+        "teams": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "nullable": True},
+                    "points": {"type": "integer", "nullable": True},
+                    "winner": {"type": "boolean", "nullable": True},
+                    "players": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "place": {"type": "integer"},
+                                "name": {"type": "string"},
+                                "score": {"type": "integer"},
+                            },
+                            "required": ["place", "name", "score"],
+                        },
+                    },
+                },
+                "required": ["players"],
+            },
+        },
+    },
+    "required": ["mode", "teams"],
+}
 
 
 def _encode_frame(frame: np.ndarray) -> str:
@@ -82,6 +102,7 @@ def _query_gemini(image_b64: str, api_key: str, model: str) -> str:
     payload = {
         "contents": [
             {
+                "role": "user",
                 "parts": [
                     {
                         "inlineData": {
@@ -90,9 +111,14 @@ def _query_gemini(image_b64: str, api_key: str, model: str) -> str:
                         }
                     },
                     {"text": _PROMPT},
-                ]
-            }
-        ]
+                ],
+            },
+        ],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "application/json",
+            "responseSchema": _RESPONSE_SCHEMA,
+        },
     }
 
     data = json.dumps(payload).encode("utf-8")
@@ -103,26 +129,80 @@ def _query_gemini(image_b64: str, api_key: str, model: str) -> str:
         method="POST",
     )
 
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=180) as resp:
         result = json.loads(resp.read().decode("utf-8"))
 
-    text = result["candidates"][0]["content"]["parts"][0]["text"]
+    candidate = result["candidates"][0]
+    parts = candidate.get("content", {}).get("parts")
+    if not parts:
+        finish = candidate.get("finishReason", "UNKNOWN")
+        raise RuntimeError(f"Gemini returned no content (finishReason={finish})")
+    text = parts[0]["text"]
     return _strip_markdown(text)
+
+
+def _repair_json(text: str) -> str:
+    """Apply forgiving repairs to common model-emitted JSON glitches.
+
+    Covers observed failure modes of gemma-4-31b-it and similar:
+      * Duplicated consecutive `"key": "key":` sequences → collapse to one.
+      * Trailing commas before `]` or `}`.
+      * Stray text before `{` / after the matching `}`.
+
+    NOTE: with structured outputs (responseSchema + responseMimeType) this
+    path is no longer exercised on the happy path. Kept as a fallback for
+    models/configs that don't support structured outputs, and for future
+    reuse in the other gemini_* modules which still go through the plain
+    JSON path.
+    """
+    repaired = text
+
+    # Trim to the outermost {...} block if there's leading/trailing prose.
+    first = repaired.find("{")
+    last = repaired.rfind("}")
+    if first != -1 and last != -1 and last > first:
+        repaired = repaired[first : last + 1]
+
+    # Collapse duplicated `"<key>": "<key>":` runs (model sometimes emits the
+    # key twice in a row, e.g. `"name": "name": "value"`). Handles any key.
+    repaired = re.sub(
+        r'("[A-Za-z_][A-Za-z0-9_]*")\s*:\s*\1\s*:',
+        r"\1:",
+        repaired,
+    )
+
+    # Strip trailing commas before ] or }.
+    repaired = re.sub(r",(\s*[}\]])", r"\1", repaired)
+
+    return repaired
 
 
 def _parse_results(text: str) -> dict:
     """Parse the Gemini response into the structured results dict.
 
-    Tries raw JSON first, then strips markdown fences and retries.
+    Tries raw JSON, then markdown-stripped JSON, then forgiving-repaired JSON.
     Returns a dict with keys ``mode``, ``teams``.
     Raises ``ValueError`` / ``json.JSONDecodeError`` on bad input.
     """
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        # Second attempt: strip any remaining markdown formatting.
-        stripped = _strip_markdown(text)
-        parsed = json.loads(stripped)
+    attempts = (
+        text,
+        _strip_markdown(text),
+        _repair_json(text),
+    )
+
+    parsed = None
+    last_err: Exception | None = None
+    for candidate in attempts:
+        try:
+            parsed = json.loads(candidate)
+            break
+        except json.JSONDecodeError as err:
+            last_err = err
+            continue
+
+    if parsed is None:
+        assert last_err is not None
+        raise last_err
 
     if "teams" not in parsed or "mode" not in parsed:
         raise ValueError("Response missing required 'teams' or 'mode' key")
