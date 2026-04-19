@@ -27,48 +27,64 @@ logger = logging.getLogger(__name__)
 _BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 _PROMPT = (
-    "These are sequential frames captured from a Mario Kart results screen. "
-    "IMPORTANT: The screen transitions through two phases that look nearly identical — "
-    "first the RACE RESULTS (placements from this race only), then the OVERALL STANDINGS (cumulative match totals). "
-    "You must only read the RACE RESULTS phase and ignore the OVERALL STANDINGS phase. "
-    "To tell them apart: in race results, the +points column follows a fixed Mario Kart points scale "
+    "These are sequential frames from a Mario Kart results screen. The screen transitions "
+    "through two phases that look nearly identical: first RACE RESULTS (placements from "
+    "this race only), then OVERALL STANDINGS (cumulative match totals). You must only read "
+    "the RACE RESULTS phase and ignore OVERALL STANDINGS. "
+    "To tell them apart: in race results the +points column follows a fixed scale "
     "(1st=+15, 2nd=+12, 3rd=+10, 4th=+9, 5th=+8, 6th=+7, 7th=+6, 8th=+5, 9th=+4, 10th=+3, 11th=+2, 12th=+1). "
-    "In overall standings, the +points values do not follow this pattern. "
-    "Discard any frames that show overall standings. "
-    "The list may scroll upward within the race results phase, so earlier frames show lower placements (higher numbers) "
-    "and later frames show higher placements (lower numbers). "
-    "Each row follows this layout from left to right: "
-    "placement number | racer icon | racer sticker | racer name | race delta (+points) | total score. "
-    "The placement number is on the far left. The racer name comes after two small images (icon and sticker). "
-    "Read the full racer name — it may contain special characters, clan tags, or symbols. "
-    "Pay close attention to star characters: a filled star is ★ and an outline/blank star is ☆. Both may appear in player names. "
-    "If a name is partially obscured in one frame, use other frames where the same player appears more clearly to complete it. "
-    "The number on the far right is the cumulative total score — ignore it. "
-    "A gold highlighted bar indicates the current player's row — it can appear on any placement in both phases, so it is not a useful signal for distinguishing race results from overall standings. "
-    "The same player may appear in multiple race results frames as the list scrolls — use the clearest reading for their name. "
-    "Determine whether the race used no teams, two teams, three teams, or four teams. "
-    "The color of each player's result bar indicates which team they belong to. "
-    "Players on the same team often share a common tag — a short prefix or suffix in their name (e.g. '[ABC]' or '|XYZ'). "
-    "Using all frames together, reconstruct the complete placement list with no duplicates and no gaps. "
-    "Return ONLY a raw JSON object. Do not wrap it in markdown, code fences, or any other formatting. No extra text before or after:\n"
-    "{\n"
-    '  "mode": "no_teams" | "two_teams" | "three_teams" | "four_teams",\n'
-    '  "teams": [\n'
-    "    {\n"
-    '      "name": "Red Team",\n'
-    '      "race_points": 42,\n'
-    '      "race_winner": true,\n'
-    '      "players": [\n'
-    '        { "place": 1, "name": "PlayerA" }\n'
-    "      ]\n"
-    "    }\n"
-    "  ]\n"
-    "}\n"
-    "For no_teams mode, use a single entry in 'teams' with name, race_points, and race_winner all set to null. "
-    "When teams are present, 'race_points' is the sum of the +race_points values shown next to each team member's name, "
-    "and 'race_winner' is true for the team with the most race_points (false for all others). "
-    "Every player must appear exactly once, ordered by placement ascending."
+    "In overall standings the +points values do NOT follow this pattern. Discard those frames. "
+    "The list may scroll upward within the race results phase, so earlier frames show lower "
+    "placements (higher numbers) and later frames show higher placements (lower numbers). "
+    "Each row, left-to-right: placement | racer icon | racer sticker | racer name | +race_points | total score (ignore the total). "
+    "Read the full racer name including special characters, clan tags, and symbols. "
+    "Pay close attention to star characters: a filled star is ★ and an outline/blank star is ☆. "
+    "If a name is partially obscured in one frame, use other frames where the same player "
+    "appears more clearly. A gold-highlighted bar marks the current player and can appear on "
+    "any placement in either phase — it is NOT a signal for distinguishing the phases. "
+    "Determine the team mode from bar colours (no_teams, two_teams, three_teams, or four_teams). "
+    "Players on the same team often share a common tag — a short prefix or suffix in their name "
+    "(e.g. '[ABC]' or '|XYZ'). "
+    "For each team give race_points (sum of the +race_points values for its members) and "
+    "race_winner (true for the team with the most race_points, false for others). For no_teams "
+    "mode return a single team with name, race_points, and race_winner all null. "
+    "Using all frames together, reconstruct the complete placement list: every player appears "
+    "exactly once, ordered by placement ascending, with no duplicates and no gaps."
 )
+
+_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "mode": {
+            "type": "string",
+            "enum": ["no_teams", "two_teams", "three_teams", "four_teams"],
+        },
+        "teams": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "nullable": True},
+                    "race_points": {"type": "integer", "nullable": True},
+                    "race_winner": {"type": "boolean", "nullable": True},
+                    "players": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "place": {"type": "integer"},
+                                "name": {"type": "string"},
+                            },
+                            "required": ["place", "name"],
+                        },
+                    },
+                },
+                "required": ["players"],
+            },
+        },
+    },
+    "required": ["mode", "teams"],
+}
 
 
 def _encode_frame(frame: np.ndarray) -> str:
@@ -93,7 +109,14 @@ def _query_gemini(frames_b64: list[str], api_key: str, model: str) -> str:
         })
     parts.append({"text": _PROMPT})
 
-    payload = {"contents": [{"parts": parts}]}
+    payload = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "application/json",
+            "responseSchema": _RESPONSE_SCHEMA,
+        },
+    }
 
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -103,7 +126,7 @@ def _query_gemini(frames_b64: list[str], api_key: str, model: str) -> str:
         method="POST",
     )
 
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=180) as resp:
         result = json.loads(resp.read().decode("utf-8"))
 
     text = result["candidates"][0]["content"]["parts"][0]["text"]
