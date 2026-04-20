@@ -1,4 +1,4 @@
-# MarioKartTableMaker
+# MKWorld Tracker
 
 ## Prerequisites
 

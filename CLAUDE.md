@@ -1,4 +1,4 @@
-# MarioKartTableMaker — CLAUDE.md
+# MKWorld Tracker — CLAUDE.md
 
 ## Project Overview
 A Python app that watches a capture card's video feed of Mario Kart and automatically detects game state, match settings, track names, player names, and race result placements using computer vision, OCR, and the Gemini LLM API.
@@ -162,4 +162,4 @@ uv run mktracker
 ```
 
 ## GitHub
-Private repo: github.com/n4t3m/MarioKartTableMaker (branch: master)
+Private repo: github.com/n4t3m/mkworld-tracker (branch: main)
