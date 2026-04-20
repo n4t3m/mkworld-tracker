@@ -74,6 +74,9 @@ def main(path: str, runs: int = 5) -> int:
 
 
 if __name__ == "__main__":
-    path = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\melwa\Documents\MarioKartTableMaker\captured_frames\20260418_211647.png"
+    if len(sys.argv) < 2:
+        print("Usage: python -m scripts.test_match_results_image <image_path> [runs]")
+        sys.exit(1)
+    path = sys.argv[1]
     runs = int(sys.argv[2]) if len(sys.argv) > 2 else 5
     sys.exit(main(path, runs))
