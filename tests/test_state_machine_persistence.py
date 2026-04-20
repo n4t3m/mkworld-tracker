@@ -15,7 +15,7 @@ The two things under test:
    the state machine has moved on (the race condition fix).
 
 We use ``tmp_path`` for ``_match_dir`` so each test is self-contained and
-doesn't touch the real ``debug_frames/`` directory.
+doesn't touch the real ``matches/`` directory.
 """
 from __future__ import annotations
 
@@ -742,7 +742,7 @@ class TestStrictPersistenceAndManualStart:
         work — it sets _match_started_at + _match_dir before the save
         call so the strict rule lets the write through."""
         import mktracker.state_machine as sm_mod
-        monkeypatch.setattr(sm_mod, "_DEBUG_DIR", tmp_path)
+        monkeypatch.setattr(sm_mod, "_MATCHES_DIR", tmp_path)
 
         sm = GameStateMachine()
 
@@ -765,7 +765,7 @@ class TestStrictPersistenceAndManualStart:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ):
         import mktracker.state_machine as sm_mod
-        monkeypatch.setattr(sm_mod, "_DEBUG_DIR", tmp_path)
+        monkeypatch.setattr(sm_mod, "_MATCHES_DIR", tmp_path)
 
         sm = GameStateMachine()
         sm.match_settings = _settings()  # mirrors what the UI does on startup
@@ -782,7 +782,7 @@ class TestStrictPersistenceAndManualStart:
         """The initial record after a manual start should have settings,
         no races, no final standings."""
         import mktracker.state_machine as sm_mod
-        monkeypatch.setattr(sm_mod, "_DEBUG_DIR", tmp_path)
+        monkeypatch.setattr(sm_mod, "_MATCHES_DIR", tmp_path)
 
         sm = GameStateMachine()
         sm.match_settings = _settings(race_count=8, teams="Two Teams")
@@ -799,7 +799,7 @@ class TestStrictPersistenceAndManualStart:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ):
         import mktracker.state_machine as sm_mod
-        monkeypatch.setattr(sm_mod, "_DEBUG_DIR", tmp_path)
+        monkeypatch.setattr(sm_mod, "_MATCHES_DIR", tmp_path)
 
         sm = GameStateMachine()
         sm.match_settings = _settings()
@@ -817,7 +817,7 @@ class TestStrictPersistenceAndManualStart:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog,
     ):
         import mktracker.state_machine as sm_mod
-        monkeypatch.setattr(sm_mod, "_DEBUG_DIR", tmp_path)
+        monkeypatch.setattr(sm_mod, "_MATCHES_DIR", tmp_path)
 
         sm = GameStateMachine()
         sm._match_settings = None  # paranoid: ensure UI hasn't pushed any
@@ -834,7 +834,7 @@ class TestStrictPersistenceAndManualStart:
         """Bumping _match_seq invalidates any in-flight callbacks from a
         prior aborted session, just like a real match start does."""
         import mktracker.state_machine as sm_mod
-        monkeypatch.setattr(sm_mod, "_DEBUG_DIR", tmp_path)
+        monkeypatch.setattr(sm_mod, "_MATCHES_DIR", tmp_path)
 
         sm = GameStateMachine()
         sm.match_settings = _settings()
@@ -847,7 +847,7 @@ class TestStrictPersistenceAndManualStart:
     ):
         """The documented 'use Reset first to start over' workflow."""
         import mktracker.state_machine as sm_mod
-        monkeypatch.setattr(sm_mod, "_DEBUG_DIR", tmp_path)
+        monkeypatch.setattr(sm_mod, "_MATCHES_DIR", tmp_path)
 
         sm = GameStateMachine()
         sm.match_settings = _settings()
@@ -882,7 +882,7 @@ class TestStrictPersistenceAndManualStart:
         should ever be written, regardless of how many states they
         traverse or how many _save_match_record calls happen."""
         import mktracker.state_machine as sm_mod
-        monkeypatch.setattr(sm_mod, "_DEBUG_DIR", tmp_path)
+        monkeypatch.setattr(sm_mod, "_MATCHES_DIR", tmp_path)
 
         sm = GameStateMachine()
         sm.match_settings = _settings()  # UI default
@@ -901,7 +901,7 @@ class TestStrictPersistenceAndManualStart:
         Start Manual Match. Nothing is persisted before the click; saves
         proceed normally after."""
         import mktracker.state_machine as sm_mod
-        monkeypatch.setattr(sm_mod, "_DEBUG_DIR", tmp_path)
+        monkeypatch.setattr(sm_mod, "_MATCHES_DIR", tmp_path)
 
         sm = GameStateMachine()
         sm.match_settings = _settings()
@@ -931,7 +931,7 @@ class TestStrictPersistenceAndManualStart:
         that was then reset should write to disk via the stale path
         (because the JSON file actually exists)."""
         import mktracker.state_machine as sm_mod
-        monkeypatch.setattr(sm_mod, "_DEBUG_DIR", tmp_path)
+        monkeypatch.setattr(sm_mod, "_MATCHES_DIR", tmp_path)
 
         sm = GameStateMachine()
         sm.match_settings = _settings()
@@ -958,7 +958,7 @@ class TestStrictPersistenceAndManualStart:
         the stale path should drop the result with a warning rather
         than crashing."""
         import mktracker.state_machine as sm_mod
-        monkeypatch.setattr(sm_mod, "_DEBUG_DIR", tmp_path)
+        monkeypatch.setattr(sm_mod, "_MATCHES_DIR", tmp_path)
 
         sm = GameStateMachine()
         sm.match_settings = _settings()

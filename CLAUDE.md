@@ -37,7 +37,7 @@ src/mktracker/
     └── match_history.py         # MatchHistoryView + MatchDetailView: match list + per-race timeline with track icons
 
 scripts/
-└── backfill_match_records.py   # Rebuild match.json for legacy debug_frames/ folders using Gemini + OCR
+└── backfill_match_records.py   # Rebuild match.json for legacy matches/ folders using Gemini + OCR
 ```
 
 ## Architecture
@@ -52,7 +52,7 @@ scripts/
   2. A red-bordered, red-tinted **header card** with an oversized red `● LIVE` pill before the match id and a `Status: in progress` line in pink.
   3. Per-race cards adapted for live mode: `_RaceCard(race, *, live=True)` shows `Awaiting placements…` instead of `No placements recorded.` and a grey `Rank …` badge while waiting for the Gemini rank callback. `_PendingRaceCard` fills in races up to `settings.race_count` with a dashed-border placeholder. `_PendingFinalStandingsCard` replaces `_FinalStandingsCard` until standings arrive.
 
-  Track icons are loaded via `TRACK_IMAGES` / `TRACK_ICONS_DIR`, scaled to 96px height (width auto-fits, no letterboxing), and cached in a module-level `_ICON_CACHE` keyed by track name. `MatchDetailView.set_record(record, *, live=False, live_status=None)` is the single rendering entry point. `refresh()` re-scans `debug_frames/` via `list_matches()` and preserves selection by `match_id`. `tick()` is called from the main window's frame loop while the history tab is visible — it rebuilds the list when the live `match_id` changes (match start/end) and re-renders the detail pane when **either** the live match's `match.json` mtime changes **or** the state machine has stepped into a new state (so the status banner updates on transitions like → `WAITING_FOR_RACE_END` that don't trigger a disk write). Both checks debounce 30fps polling so the pane doesn't flicker. No new persistence path was needed: the state machine already calls `_save_match_record()` after every meaningful update, so the on-disk record is always live.
+  Track icons are loaded via `TRACK_IMAGES` / `TRACK_ICONS_DIR`, scaled to 96px height (width auto-fits, no letterboxing), and cached in a module-level `_ICON_CACHE` keyed by track name. `MatchDetailView.set_record(record, *, live=False, live_status=None)` is the single rendering entry point. `refresh()` re-scans `matches/` via `list_matches()` and preserves selection by `match_id`. `tick()` is called from the main window's frame loop while the history tab is visible — it rebuilds the list when the live `match_id` changes (match start/end) and re-renders the detail pane when **either** the live match's `match.json` mtime changes **or** the state machine has stepped into a new state (so the status banner updates on transitions like → `WAITING_FOR_RACE_END` that don't trigger a disk write). Both checks debounce 30fps polling so the pane doesn't flicker. No new persistence path was needed: the state machine already calls `_save_match_record()` after every meaningful update, so the on-disk record is always live.
 - **gemini_client.py** handles Gemini API key and model persistence in `.env` via `python-dotenv`. Health check uses a GET request to `/v1beta/models/{model}` (no tokens consumed). `_VerifyThread` runs the check off the main thread.
 
 ## Threading Model
@@ -104,27 +104,27 @@ scripts/
 - When no API key is configured, all three fall back to OCR-based detection with no Gemini calls.
 
 ## Debug Frame Saving
-- Each match creates a timestamped folder under `debug_frames/` (gitignored)
+- Each match creates a timestamped folder under `matches/` (gitignored)
 - `match_settings.png`, `match_results.png` at match level
 - Per-race subfolder `race_NN/` contains: `track.png`, `players.png`, `finish.png`, `rank.png`, `placement_NN.png` (race result frames)
 - Gemini request/response logs saved alongside frames: `gemini_rank.txt`, `gemini_results.txt`, `gemini_match_results.txt`
 - Race result frames saved to `debug_placements/` (gitignored) when new placements are captured (temporary debugging)
 
 ## Match History Persistence
-- Each match folder under `debug_frames/<timestamp>/` also contains a `match.json` written by the state machine — the standardised, on-disk representation of the match. This is the data backing the match history UI (including the live, in-progress match); the debug folder structure doubles as the history store.
+- Each match folder under `matches/<timestamp>/` also contains a `match.json` written by the state machine — the standardised, on-disk representation of the match. This is the data backing the match history UI (including the live, in-progress match); the debug folder structure doubles as the history store.
 - The schema lives in [`match_record.py`](src/mktracker/match_record.py): `MatchRecord` → `RaceRecord` → `PlayerPlacement`/`TeamGroup`, plus `FinalStandings` and `MatchSettingsRecord`. It is a superset of both detection paths — `mode` and `teams` are populated from Gemini when available and left `None` for OCR-only matches. Schema version is tracked in `SCHEMA_VERSION` for future migrations.
-- `match_record.list_matches(debug_dir)` returns every persisted match newest-first; legacy folders without a `match.json` are skipped silently.
+- `match_record.list_matches(matches_dir)` returns every persisted match newest-first; legacy folders without a `match.json` are skipped silently.
 - `GameStateMachine._save_match_record()` snapshots state and writes the JSON atomically (tmp file → rename). It is called after every meaningful update: settings detected, race added, race rank/results callbacks, OCR placement finalisation, and final-standings arrival. Partial matches are preserved on disk if the match never finalises.
 - `_match_started_at` is set when settings are detected OR when `start_manual_match()` is called explicitly; `_match_completed_at` is set when final standings actually arrive (OCR or Gemini). Both are cleared by `reset()` along with `_match_dir`.
 - **Strict persistence rule**: `_save_match_record()` refuses to write unless `_match_started_at` is set. This is the explicit opt-in that prevents "ghost matches" — folders created lazily by frame-saving handlers after a manual `advance()` — from polluting the history store with empty/partial records. The only two ways to set `_match_started_at` are real settings detection in `_handle_waiting` or an explicit `start_manual_match()` call.
 - **`start_manual_match()`** primes `_match_started_at`, `_match_dir`, and `_match_seq` from the UI's currently-pushed `_match_settings`. It's wired to a "Start Manual Match" button in the toolbar. Required when the user advances past `WAITING_FOR_MATCH` manually and wants the resulting session persisted. No-op if a match is already in progress (use Reset first to start over). Returns `True` on success, `False` if it was a no-op.
 
 ## Match Record Backfill
-- Legacy match folders that predate the `match.json` persistence layer can be reconstructed via `scripts/backfill_match_records.py`. It walks `debug_frames/`, skips folders that already have `match.json` (unless `--force`), and rebuilds the record from whatever frames are saved on disk.
+- Legacy match folders that predate the `match.json` persistence layer can be reconstructed via `scripts/backfill_match_records.py`. It walks `matches/`, skips folders that already have `match.json` (unless `--force`), and rebuilds the record from whatever frames are saved on disk.
 - Runs **fresh Gemini calls** (not the cached `gemini_*.txt` logs) for race rank, race results, and final match results — it imports the prompts and HTTP/parse helpers (`_PROMPT`, `_encode_frame`, `_query_gemini`, `_parse_rank`, `_parse_results`) from the live modules to stay in lockstep. OCR is used for match settings, track name, and player names (same as the live app).
 - Placement frames are sampled evenly (default max 12 per race, configurable via `--max-placement-frames`) to keep Gemini payloads under limits — sending all 40+ frames per race produced HTTP 400s.
 - Overwrites the `gemini_*.txt` debug logs alongside the frames, so stale/errored logs from the original runs are replaced.
-- Invocation: `python -m scripts.backfill_match_records [--debug-dir debug_frames] [--force] [--max-placement-frames 12]`. Requires a configured Gemini API key (via `.env` or the Settings tab).
+- Invocation: `python -m scripts.backfill_match_records [--matches-dir matches] [--force] [--max-placement-frames 12]`. Requires a configured Gemini API key (via `.env` or the Settings tab).
 
 ## Data Model
 - **`RaceInfo`** (frozen dataclass): `track_name`, `players`, `placements` (from OCR or Gemini), `race_rank` (user's placement from Gemini, async), `gemini_results` (full structured Gemini response dict, async). Both `race_rank` and `gemini_results` start as `None`; background Gemini callbacks replace the entry in `_races[i]` via `dataclasses.replace()` (a new frozen instance) + single-index list assignment (GIL-atomic in CPython).

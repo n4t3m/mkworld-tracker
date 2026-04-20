@@ -1,6 +1,6 @@
-"""Rebuild ``match.json`` for legacy matches in ``debug_frames/``.
+"""Rebuild ``match.json`` for legacy matches in ``matches/``.
 
-Walks every subfolder of ``debug_frames/`` that lacks ``match.json`` and
+Walks every subfolder of ``matches/`` that lacks ``match.json`` and
 reconstructs one from the saved frames.  Re-runs Gemini synchronously for
 race rank, race results, and final match results (mirroring the live app),
 and uses the normal OCR detectors for match settings, track names, and
@@ -8,7 +8,7 @@ player lists.  Existing ``gemini_*.txt`` logs are NOT reused — every race
 gets a fresh Gemini call so broken/errored logs don't poison the output.
 
 Usage:
-    python -m scripts.backfill_match_records [--debug-dir debug_frames]
+    python -m scripts.backfill_match_records [--matches-dir matches]
                                              [--force]
                                              [--max-placement-frames 12]
 """
@@ -53,7 +53,7 @@ from mktracker.gemini_results import (
     _query_gemini as query_race_results,
 )
 from mktracker.match_record import (
-    DEFAULT_DEBUG_DIR,
+    DEFAULT_MATCHES_DIR,
     FinalStandings,
     MATCH_FILE,
     MatchRecord,
@@ -443,7 +443,7 @@ def _build_match_record(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--debug-dir", type=Path, default=DEFAULT_DEBUG_DIR)
+    parser.add_argument("--matches-dir", type=Path, default=DEFAULT_MATCHES_DIR)
     parser.add_argument(
         "--force", action="store_true",
         help="Rebuild even if match.json already exists.",
@@ -465,12 +465,12 @@ def main() -> None:
         return
     logger.info("Using Gemini model: %s", model)
 
-    if not args.debug_dir.exists():
-        logger.error("Directory not found: %s", args.debug_dir)
+    if not args.matches_dir.exists():
+        logger.error("Directory not found: %s", args.matches_dir)
         return
 
-    folders = sorted(d for d in args.debug_dir.iterdir() if d.is_dir())
-    logger.info("Scanning %d folder(s) under %s", len(folders), args.debug_dir)
+    folders = sorted(d for d in args.matches_dir.iterdir() if d.is_dir())
+    logger.info("Scanning %d folder(s) under %s", len(folders), args.matches_dir)
 
     built = skipped = 0
     for folder in folders:

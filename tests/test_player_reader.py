@@ -12,7 +12,7 @@ from mktracker.detection.player_reader import PlayerReader
 DEBUG_DIR = os.path.join(
     os.path.dirname(__file__),
     "..",
-    "debug_frames",
+    "matches",
     "20260329_110511",
 )
 

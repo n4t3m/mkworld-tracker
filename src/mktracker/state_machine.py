@@ -37,8 +37,8 @@ logger = logging.getLogger(__name__)
 # How long to wait after match settings are detected before looking for tracks.
 _MATCH_START_DELAY = 5.0
 
-# Directory where debug frames are saved.
-_DEBUG_DIR = Path("debug_frames")
+# Directory where match records and per-match debug frames are saved.
+_MATCHES_DIR = Path("matches")
 _DEBUG_FINISH_DIR = Path("debug_finish")
 _DEBUG_RANK_DIR = Path("debug_rank")
 
@@ -190,7 +190,7 @@ class GameStateMachine:
     def start_manual_match(self) -> bool:
         """Mark the current state machine as the start of a manual match
         session, so subsequent meaningful state changes get persisted to
-        ``debug_frames/<timestamp>/match.json``.
+        ``matches/<timestamp>/match.json``.
 
         This is the explicit opt-in for users who advance past
         ``WAITING_FOR_MATCH`` manually and bypass real settings detection.
@@ -217,7 +217,7 @@ class GameStateMachine:
         self._match_seq += 1
         now = datetime.now()
         self._match_started_at = now
-        self._match_dir = _DEBUG_DIR / now.strftime("%Y%m%d_%H%M%S")
+        self._match_dir = _MATCHES_DIR / now.strftime("%Y%m%d_%H%M%S")
         self._match_dir.mkdir(parents=True, exist_ok=True)
         s = self._match_settings
         logger.info(
@@ -279,7 +279,7 @@ class GameStateMachine:
         self._match_seq += 1
         now = datetime.now()
         self._match_started_at = now
-        self._match_dir = _DEBUG_DIR / now.strftime("%Y%m%d_%H%M%S")
+        self._match_dir = _MATCHES_DIR / now.strftime("%Y%m%d_%H%M%S")
         self._match_dir.mkdir(parents=True, exist_ok=True)
         self._save_frame(frame, "match_settings")
         logger.info(
@@ -979,7 +979,7 @@ class GameStateMachine:
     def _race_dir(self, race_num: int) -> Path:
         """Return the debug directory for a given race, creating it if needed."""
         if self._match_dir is None:
-            self._match_dir = _DEBUG_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._match_dir = _MATCHES_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
             self._match_dir.mkdir(parents=True, exist_ok=True)
         race_dir = self._match_dir / f"race_{race_num:02d}"
         race_dir.mkdir(exist_ok=True)
@@ -994,7 +994,7 @@ class GameStateMachine:
 
     def _save_frame(self, frame: np.ndarray, label: str) -> None:
         if self._match_dir is None:
-            self._match_dir = _DEBUG_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._match_dir = _MATCHES_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
             self._match_dir.mkdir(parents=True, exist_ok=True)
         safe = re.sub(r"[^\w\-]", "_", label)
         path = self._match_dir / f"{safe}.png"

@@ -1,6 +1,6 @@
 """Match history UI.
 
-Shows a list of previously played matches (loaded from ``debug_frames/``) on
+Shows a list of previously played matches (loaded from ``matches/``) on
 the left and a scrollable per-race timeline on the right.  The detail widget
 accepts any :class:`MatchRecord`, so it is also used to display the
 currently-running match — the state machine writes ``match.json`` after every
@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 
 from mktracker.detection.tracks import TRACK_ICONS_DIR, TRACK_IMAGES
 from mktracker.match_record import (
-    DEFAULT_DEBUG_DIR,
+    DEFAULT_MATCHES_DIR,
     MATCH_FILE,
     FinalStandings,
     MatchRecord,
@@ -1381,9 +1381,9 @@ class _RaceDetailView(QWidget):
 class MatchDetailView(QWidget):
     """Right-hand detail pane: stacked match-timeline + race-detail views."""
 
-    def __init__(self, debug_dir: Path = DEFAULT_DEBUG_DIR) -> None:
+    def __init__(self, matches_dir: Path = DEFAULT_MATCHES_DIR) -> None:
         super().__init__()
-        self._debug_dir = debug_dir
+        self._matches_dir = matches_dir
         self._current_record: MatchRecord | None = None
 
         layout = QVBoxLayout(self)
@@ -1404,8 +1404,8 @@ class MatchDetailView(QWidget):
     def is_showing_race_detail(self) -> bool:
         return self._stack.currentIndex() == 1
 
-    def set_debug_dir(self, debug_dir: Path) -> None:
-        self._debug_dir = debug_dir
+    def set_matches_dir(self, matches_dir: Path) -> None:
+        self._matches_dir = matches_dir
 
     def set_record(
         self,
@@ -1442,7 +1442,7 @@ class MatchDetailView(QWidget):
         )
         if race is None:
             return
-        match_dir = self._debug_dir / record.match_id
+        match_dir = self._matches_dir / record.match_id
         self._race_detail.set_race(race, record.settings, match_dir)
         self._stack.setCurrentIndex(1)
 
@@ -1454,11 +1454,11 @@ class MatchHistoryView(QWidget):
 
     def __init__(
         self,
-        debug_dir: Path = DEFAULT_DEBUG_DIR,
+        matches_dir: Path = DEFAULT_MATCHES_DIR,
         state_machine: "GameStateMachine | None" = None,
     ) -> None:
         super().__init__()
-        self._debug_dir = debug_dir
+        self._matches_dir = matches_dir
         self._state_machine = state_machine
         self._records: list[MatchRecord] = []
         # Tracks the live match id we showed on the most recent tick(); used
@@ -1507,7 +1507,7 @@ class MatchHistoryView(QWidget):
         self._list.currentRowChanged.connect(self._on_row_changed)
         split.addWidget(self._list)
 
-        self._detail = MatchDetailView(debug_dir=self._debug_dir)
+        self._detail = MatchDetailView(matches_dir=self._matches_dir)
         split.addWidget(self._detail, stretch=1)
 
         root.addLayout(split, stretch=1)
@@ -1527,13 +1527,13 @@ class MatchHistoryView(QWidget):
         return _LIVE_STATUS_TEXT.get(sm.state.name, sm.state.name)
 
     def refresh(self) -> None:
-        """Re-scan ``debug_dir`` and rebuild the match list."""
+        """Re-scan ``matches_dir`` and rebuild the match list."""
         previous_id = None
         current_row = self._list.currentRow()
         if 0 <= current_row < len(self._records):
             previous_id = self._records[current_row].match_id
 
-        self._records = list_matches(self._debug_dir)
+        self._records = list_matches(self._matches_dir)
         live_id = self._live_match_id()
         self._last_live_match_id = live_id
         self._last_live_mtime = 0.0
@@ -1604,7 +1604,7 @@ class MatchHistoryView(QWidget):
             return
         if self._records[current_row].match_id != live_id:
             return
-        match_path = self._debug_dir / live_id / MATCH_FILE
+        match_path = self._matches_dir / live_id / MATCH_FILE
         try:
             mtime = match_path.stat().st_mtime
         except OSError:
@@ -1613,7 +1613,7 @@ class MatchHistoryView(QWidget):
         if mtime == self._last_live_mtime and live_status == self._last_live_status:
             return
         try:
-            record = MatchRecord.load(self._debug_dir / live_id)
+            record = MatchRecord.load(self._matches_dir / live_id)
         except (OSError, ValueError, KeyError):
             return
         self._last_live_mtime = mtime

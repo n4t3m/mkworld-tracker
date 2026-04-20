@@ -3,13 +3,13 @@
 A :class:`MatchRecord` captures everything we know about a single match: the
 settings, every race that was played, and the final standings.  Records are
 persisted as ``match.json`` next to the per-match debug frames in
-``debug_frames/<timestamp>/``, so the existing folder structure doubles as
+``matches/<timestamp>/``, so the existing folder structure doubles as
 the match history store.
 
 The schema is intentionally a superset of both the OCR and Gemini detection
 paths, with optional fields (``mode``, ``teams``) for the richer per-team
 data that only Gemini provides.  :func:`list_matches` scans
-``debug_frames/`` and returns every persisted record, newest first — this
+``matches/`` and returns every persisted record, newest first — this
 is the entry point for the future "match history" UI.
 """
 
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 MATCH_FILE = "match.json"
-DEFAULT_DEBUG_DIR = Path("debug_frames")
+DEFAULT_MATCHES_DIR = Path("matches")
 
 
 @dataclasses.dataclass
@@ -230,16 +230,16 @@ class MatchRecord:
             return cls.from_dict(json.load(f))
 
 
-def list_matches(debug_dir: Path = DEFAULT_DEBUG_DIR) -> list[MatchRecord]:
-    """Return every persisted match in *debug_dir*, newest first.
+def list_matches(matches_dir: Path = DEFAULT_MATCHES_DIR) -> list[MatchRecord]:
+    """Return every persisted match in *matches_dir*, newest first.
 
     Folders without a ``match.json`` are skipped silently — they are
     legacy debug-only matches predating the standardised format.
     """
-    if not debug_dir.exists():
+    if not matches_dir.exists():
         return []
     records: list[MatchRecord] = []
-    for sub in sorted(debug_dir.iterdir(), reverse=True):
+    for sub in sorted(matches_dir.iterdir(), reverse=True):
         if not sub.is_dir() or not (sub / MATCH_FILE).exists():
             continue
         try:

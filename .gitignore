@@ -23,7 +23,8 @@ env/
 # Secrets
 .env
 
-# Debug
+# Match history & debug
+matches/
 debug_frames/
 debug_placements/
 debug_rank/
