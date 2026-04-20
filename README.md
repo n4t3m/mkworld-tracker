@@ -4,6 +4,34 @@ A desktop app that watches your Switch capture card and automatically logs Mario
 
 This is intended to be used to track war and mogi data over a long period of time.
 
+## Demo
+
+**Match start detection**
+
+https://github.com/user-attachments/assets/1bab91df-a4b8-4238-9d11-cdeda0bbe834
+
+**Track selection**
+
+https://github.com/user-attachments/assets/89d95382-ad98-4ff3-8d38-a708a3c63ebd
+
+**Race results**
+
+https://github.com/user-attachments/assets/c462f28f-29c9-477e-9c7b-23d69a2da6dd
+
+**Team match scoring**
+
+Per-race team scores and race winner are calculated automatically from the detected placements.
+
+![Team match result example](assets/images/warresultexample.png)
+
+**Match end**
+
+https://github.com/user-attachments/assets/d7ac429f-694b-42a3-90be-5c84c20f4a71
+
+**Menu navigation**
+
+https://github.com/user-attachments/assets/44d16668-a95c-4bb5-8190-1f4e8add526e
+
 ## Features
 
 - **Live game state detection**: This program will automatically detect when a match starts and track all information about the race, track selection, placements, etc. No manual interaction from you is needed.

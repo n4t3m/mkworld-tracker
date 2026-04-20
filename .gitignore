@@ -30,6 +30,9 @@ debug_placements/
 debug_rank/
 debug_finish/
 
+# Demo media (hosted externally via GitHub user-attachments)
+assets/demo/
+
 # Test data provided externally (not tracked)
 testdata/
 captured_frames/
