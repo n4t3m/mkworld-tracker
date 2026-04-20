@@ -65,7 +65,7 @@ _DETECT_FAST_N_FRAMES = 3   # faster sampling during race results reading
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("MK Tracker")
+        self.setWindowTitle("MKWorld Tracker")
         self.resize(1280, 800)
 
         self._capture = VideoCapture()
