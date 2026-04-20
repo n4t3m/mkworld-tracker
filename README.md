@@ -1,5 +1,21 @@
 # MKWorld Tracker
 
+A desktop app that watches your Switch capture card and automatically logs Mario Kart World matches (settings, tracks, players, race placements, and final standings) using a mix of computer vision, OCR, and the Gemini API.
+
+This is intended to be used to track war and mogi data over a long period of time.
+
+## Features
+
+- **Live game state detection**: This program will automatically detect when a match starts and track all information about the race, track selection, placements, etc. No manual interaction from you is needed.
+- **Match settings recognition**: Auto-reads and adapts to the number of teams and race count and gives specialized info based on that.
+- **Track detection**: Automatically recognizes each of the tracks being played.
+- **Per-race placements**: Records the full finishing order after every race. This accounts for different team modes.
+- **Final match standings**: Captures the final scores and standings at the end of every match automatically.
+- **Persistent match history**: Every match you play is saved automatically and viewable later in a Match History tab, with a per-race breakdown.
+- **Live match view**: Watch your in-progress match update live in the history tab as each race finishes.
+- **Gemini integration (optional)**: A free Gemini API key can be used to drastically improve the detected names throughout the program.
+- **Cross-platform support**: Works on Windows, macOS, and Linux with any USB capture card that delivers a 1920x1080 feed from your Switch.
+
 ## Prerequisites
 
 ### Capture card
