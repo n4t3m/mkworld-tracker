@@ -7,6 +7,7 @@ A Python app that watches a capture card's video feed of Mario Kart and automati
 - **PySide6** — Qt6 GUI (video display, source selector dropdown, state label, advance/reset buttons, match settings editor, settings tab)
 - **OpenCV** (`opencv-python`) — video capture and frame processing
 - **pytesseract** — OCR via Tesseract (binary must be installed; auto-detected at `C:\Program Files\Tesseract-OCR\`). Used as fallback when no Gemini API key is configured.
+- **Pillow** — image generation for the Lorenzi-style match result table (`table_generator.py`)
 - **python-dotenv** — loads/saves `.env` for Gemini API key and model persistence
 - **Python >=3.10**, packaged with `pyproject.toml` + hatchling
 
@@ -37,7 +38,8 @@ src/mktracker/
     └── match_history.py         # MatchHistoryView + MatchDetailView: match list + per-race timeline with track icons
 
 scripts/
-└── backfill_match_records.py   # Rebuild match.json for legacy matches/ folders using Gemini + OCR
+├── backfill_match_records.py   # Rebuild match.json for legacy matches/ folders using Gemini + OCR
+└── generate_table.py           # CLI: generate a table PNG for a match by ID (or most recent)
 ```
 
 ## Architecture
@@ -118,6 +120,17 @@ scripts/
 - `_match_started_at` is set when settings are detected OR when `start_manual_match()` is called explicitly; `_match_completed_at` is set when final standings actually arrive (OCR or Gemini). Both are cleared by `reset()` along with `_match_dir`.
 - **Strict persistence rule**: `_save_match_record()` refuses to write unless `_match_started_at` is set. This is the explicit opt-in that prevents "ghost matches" — folders created lazily by frame-saving handlers after a manual `advance()` — from polluting the history store with empty/partial records. The only two ways to set `_match_started_at` are real settings detection in `_handle_waiting` or an explicit `start_manual_match()` call.
 - **`start_manual_match()`** primes `_match_started_at`, `_match_dir`, and `_match_seq` from the UI's currently-pushed `_match_settings`. It's wired to a "Start Manual Match" button in the toolbar. Required when the user advances past `WAITING_FOR_MATCH` manually and wants the resulting session persisted. No-op if a match is already in progress (use Reset first to start over). Returns `True` on success, `False` if it was a no-op.
+
+## Table Generator
+- **`src/mktracker/table_generator.py`** — `generate_table(record: MatchRecord) -> bytes` returns a PNG of a Lorenzi-style match result table.
+- Fonts (Roboto variable, RubikMonoOne, NotoSans JP) are downloaded from the Google Fonts GitHub repo on first use and cached in `src/mktracker/assets/fonts/` (gitignored).
+- **Single-clan (FFA)**: player rows span the full image width; no clan tag or total score shown.
+- **Multi-clan (teams)**: three-column layout — rank + tag on left, player rows in centre, clan total score on right. A black gap with a subtle divider line and score-differential label (`+N`) separates teams.
+- Clan background colour is derived from the team tag via a character hash (matching Lorenzi's `table.js` hue algorithm). FFA matches use the match ID as the hash seed so each match gets a distinct colour.
+- Row backgrounds are lightened with a 58% white blend over the clan colour for contrast; all name/rank text is pure black.
+- Japanese/CJK player names (Hiragana, Katakana, fullwidth/halfwidth forms) automatically use NotoSans JP as a fallback font.
+- `scripts/generate_table.py` is a standalone CLI for generating a table from any saved match: `uv run python -m scripts.generate_table [match_id]`. Saves `table.png` alongside the match folder.
+- Not yet wired into the UI — the planned integration point is a "Generate Table" button in the Match History detail view.
 
 ## Match Record Backfill
 - Legacy match folders that predate the `match.json` persistence layer can be reconstructed via `scripts/backfill_match_records.py`. It walks `matches/`, skips folders that already have `match.json` (unless `--force`), and rebuilds the record from whatever frames are saved on disk.

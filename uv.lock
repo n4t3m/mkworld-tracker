@@ -12,6 +12,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "opencv-python" },
+    { name = "pillow" },
     { name = "pyside6" },
     { name = "pytesseract" },
     { name = "python-dotenv" },
@@ -20,6 +21,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "opencv-python", specifier = ">=4.9" },
+    { name = "pillow", specifier = ">=10.0" },
     { name = "pyside6", specifier = ">=6.6" },
     { name = "pytesseract", specifier = ">=0.3.10" },
     { name = "python-dotenv", specifier = ">=1.0" },

@@ -33,6 +33,9 @@ debug_finish/
 # Demo media (hosted externally via GitHub user-attachments)
 assets/demo/
 
+# Downloaded fonts (cached at runtime, not committed)
+src/mktracker/assets/fonts/*.ttf
+
 # Test data provided externally (not tracked)
 testdata/
 captured_frames/
