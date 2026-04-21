@@ -56,10 +56,12 @@ class TeamGroup:
     points: int | None
     winner: bool | None
     players: list[PlayerPlacement]
+    tag: str | None = None  # Clan tag prefix stripped from player names by Gemini
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
+            "tag": self.tag,
             "points": self.points,
             "winner": self.winner,
             "players": [p.to_dict() for p in self.players],
@@ -69,6 +71,7 @@ class TeamGroup:
     def from_dict(cls, data: dict[str, Any]) -> "TeamGroup":
         return cls(
             name=data.get("name"),
+            tag=data.get("tag"),
             points=data.get("points"),
             winner=data.get("winner"),
             players=[PlayerPlacement.from_dict(p) for p in data.get("players", [])],

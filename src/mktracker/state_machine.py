@@ -767,6 +767,7 @@ class GameStateMachine:
                 ))
             teams.append(TeamGroup(
                 name=team.get("name"),
+                tag=team.get("tag"),
                 points=team.get("race_points"),
                 winner=team.get("race_winner"),
                 players=tg_players,
@@ -796,6 +797,7 @@ class GameStateMachine:
                 ))
             teams.append(TeamGroup(
                 name=team.get("name"),
+                tag=team.get("tag"),
                 points=team.get("points"),
                 winner=team.get("winner"),
                 players=tg_players,

@@ -38,6 +38,13 @@ _PROMPT = (
     "must appear in one and only one team's players list. The sum of len(team.players) "
     "across all teams must equal the total number of result bars visible on screen. Never "
     "duplicate a player across teams. "
+    "CLAN TAG RULE: inspect the player names within each team. If the majority share a "
+    "common prefix or bracket tag (e.g. 'GK', 'Zog Zhit', '[ABC]'), extract the LONGEST "
+    "common prefix shared by those players as the team's 'tag' field, then strip that "
+    "prefix — including any trailing space or separator — from every player's 'name' so "
+    "that 'name' contains only the player-unique part (e.g. 'Zog Zhit A' → tag='Zog Zhit', "
+    "name='A'; 'GK Breezy' → tag='GK', name='Breezy'). If players on a team have no "
+    "common prefix, set 'tag' to null and leave 'name' unchanged. "
     "For each team give its displayed total points, whether it won (winner=true for the "
     "team with the highest points, false for all others), and every player with their final "
     "OVERALL placement (1..N across ALL players, not per-team), display name, and score. "
@@ -60,6 +67,7 @@ _RESPONSE_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "nullable": True},
+                    "tag": {"type": "string", "nullable": True},
                     "points": {"type": "integer", "nullable": True},
                     "winner": {"type": "boolean", "nullable": True},
                     "players": {

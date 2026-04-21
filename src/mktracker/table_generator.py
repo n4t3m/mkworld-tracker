@@ -71,6 +71,18 @@ def _mono(rubik: Path, size: float) -> ImageFont.FreeTypeFont:
     return ImageFont.truetype(str(rubik), size=max(1, round(size)))
 
 
+def _bold_fit(roboto: Path, text: str, max_width: float, ideal_size: float) -> ImageFont.FreeTypeFont:
+    """Return the largest bold font that renders *text* within *max_width*."""
+    size = ideal_size
+    while size >= 6:
+        font = _bold(roboto, size)
+        w = font.getlength(text)
+        if w <= max_width:
+            return font
+        size -= 1
+    return _bold(roboto, 6)
+
+
 def _needs_cjk(text: str) -> bool:
     """Return True if text contains characters outside Roboto's coverage."""
     for c in text:
@@ -177,7 +189,7 @@ def _build_clans(record: MatchRecord) -> list[_Clan]:
     if fs.teams and len(fs.teams) >= 2:
         return [
             _Clan(
-                tag=t.name or "?",
+                tag=t.tag or t.name or "?",
                 players=[
                     {"name": p.name, "total_score": p.score or 0}
                     for p in t.players
@@ -416,7 +428,7 @@ def generate_table(record: MatchRecord) -> bytes:
                     draw.text(
                         (CLAN_NAME_X, mid_y), clan.tag,
                         fill=(0, 0, 0),
-                        font=_bold(roboto, score_sz),
+                        font=_bold_fit(roboto, clan.tag, CLAN_NAME_W * 0.9, score_sz),
                         anchor="mm",
                     )
                 if show_clan_ranks:
