@@ -15,14 +15,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -32,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from mktracker.detection.tracks import TRACK_ICONS_DIR, TRACK_IMAGES
+from mktracker.lorenzi_text import standings_to_text, text_to_standings
 from mktracker.match_record import (
     DEFAULT_MATCHES_DIR,
     MATCH_FILE,
@@ -42,6 +47,7 @@ from mktracker.match_record import (
     TeamGroup,
     list_matches,
 )
+from mktracker.table_generator import generate_table
 
 if TYPE_CHECKING:
     from mktracker.state_machine import GameStateMachine
@@ -786,6 +792,172 @@ class _FinalStandingsCard(QFrame):
                 layout.addWidget(row)
 
 
+class _TableEditDialog(QDialog):
+    """Lorenzi-style textbox editor for the results table.
+
+    Prefilled from ``record.final_standings``.  On save, parses the text
+    back into a :class:`FinalStandings`, writes it to ``match.json``, and
+    regenerates ``table.png`` in the match folder.
+    """
+
+    def __init__(
+        self,
+        record: MatchRecord,
+        matches_dir: Path,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._record = record
+        self._matches_dir = matches_dir
+        self._match_dir = matches_dir / record.match_id
+        self.setWindowTitle(f"Edit table — {record.match_id}")
+        self.resize(560, 620)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        intro = QLabel(
+            "One team per block, blank line between teams.\n"
+            "First line of a block is the team tag. Player lines are"
+            " '<name> <score>' — scores may be expressions like '70+20+8'.\n"
+            "Omit tag lines for FFA matches."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("QLabel { color: #aab; }")
+        layout.addWidget(intro)
+
+        self._editor = QPlainTextEdit()
+        self._editor.setPlainText(standings_to_text(record.final_standings))
+        self._editor.setStyleSheet(
+            "QPlainTextEdit { background-color: #101418; color: #eee;"
+            " font-family: Consolas, monospace; font-size: 13px;"
+            " border: 1px solid #2a2a2a; border-radius: 4px; padding: 6px; }"
+        )
+        layout.addWidget(self._editor, stretch=1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel,
+        )
+        buttons.accepted.connect(self._on_save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_save(self) -> None:
+        try:
+            standings = text_to_standings(self._editor.toPlainText())
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Invalid table text",
+                f"Could not parse table text:\n{exc}",
+            )
+            return
+        if not standings.players:
+            QMessageBox.warning(
+                self, "Empty table",
+                "No player rows found — add at least one '<name> <score>' line.",
+            )
+            return
+
+        self._record.final_standings = standings
+        try:
+            png = generate_table(self._record)
+            (self._match_dir / "table.png").write_bytes(png)
+            self._record.save(self._match_dir)
+        except Exception as exc:
+            logger.exception("Failed to save edited table")
+            QMessageBox.critical(
+                self, "Save failed",
+                f"Could not save edited table:\n{exc}",
+            )
+            return
+        self.accept()
+
+
+class _TableImageCard(QFrame):
+    """Embeds the generated Lorenzi-style results table image."""
+
+    editRequested = Signal()
+
+    def __init__(self, path: Path, *, show_edit_button: bool = True) -> None:
+        super().__init__()
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet(
+            "_TableImageCard { background-color: #141414; border: 1px solid #2a2a2a;"
+            " border-radius: 6px; }"
+            " QLabel { color: #ddd; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(6)
+
+        header_row = QHBoxLayout()
+        header_row.setSpacing(8)
+        heading = QLabel("Results Table")
+        heading.setStyleSheet(
+            "QLabel { font-size: 15px; font-weight: bold; color: #ace; }"
+        )
+        header_row.addWidget(heading)
+        header_row.addStretch()
+
+        self._full_pixmap: QPixmap | None = None
+        pm = QPixmap(str(path))
+        if not pm.isNull():
+            self._full_pixmap = pm
+
+        btn_style = (
+            "QPushButton { background-color: #2a3b4a; color: #fff; border: none;"
+            " border-radius: 4px; padding: 6px 12px; font-weight: bold; }"
+            " QPushButton:hover { background-color: #35506b; }"
+        )
+        if self._full_pixmap is not None:
+            self._copy_btn = QPushButton("Copy Table")
+            self._copy_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            self._copy_btn.setStyleSheet(btn_style)
+            self._copy_btn.setToolTip("Copy the table image to the clipboard")
+            self._copy_btn.clicked.connect(self._copy_to_clipboard)
+            header_row.addWidget(self._copy_btn)
+        if show_edit_button:
+            edit_btn = QPushButton("Edit Table")
+            edit_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            edit_btn.setStyleSheet(btn_style)
+            edit_btn.clicked.connect(self.editRequested.emit)
+            header_row.addWidget(edit_btn)
+        layout.addLayout(header_row)
+
+        image_label = QLabel()
+        image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if self._full_pixmap is None:
+            image_label.setText(f"{path.name} could not be loaded")
+            image_label.setStyleSheet(
+                "QLabel { color: #666; font-style: italic; padding: 20px; }"
+            )
+        else:
+            scaled = self._full_pixmap.scaledToWidth(
+                720, Qt.TransformationMode.SmoothTransformation,
+            )
+            image_label.setPixmap(scaled)
+            image_label.setFixedSize(scaled.size())
+        layout.addWidget(image_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+    def _copy_to_clipboard(self) -> None:
+        if self._full_pixmap is None:
+            return
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is None:
+            return
+        clipboard.setPixmap(self._full_pixmap)
+        original = self._copy_btn.text()
+        self._copy_btn.setText("Copied!")
+        self._copy_btn.setEnabled(False)
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(1200, lambda: (
+            self._copy_btn.setText(original),
+            self._copy_btn.setEnabled(True),
+        ))
+
+
 class _MatchTimelinePane(QScrollArea):
     """Scrollable timeline of races for a single match.
 
@@ -793,9 +965,11 @@ class _MatchTimelinePane(QScrollArea):
     """
 
     raceSelected = Signal(int)  # race_number
+    editTableRequested = Signal()
 
-    def __init__(self) -> None:
+    def __init__(self, matches_dir: Path = DEFAULT_MATCHES_DIR) -> None:
         super().__init__()
+        self._matches_dir = matches_dir
         self.setWidgetResizable(True)
         self._inner = QWidget()
         self._layout = QVBoxLayout(self._inner)
@@ -885,6 +1059,12 @@ class _MatchTimelinePane(QScrollArea):
 
         header = self._build_header(record, live=live)
         self._layout.addWidget(header)
+
+        table_path = self._matches_dir / record.match_id / "table.png"
+        if record.final_standings is not None and table_path.exists():
+            card = _TableImageCard(table_path, show_edit_button=not live)
+            card.editRequested.connect(self.editTableRequested.emit)
+            self._layout.addWidget(card)
 
         races = sorted(record.races, key=lambda r: r.race_number)
         if races or live:
@@ -1381,6 +1561,8 @@ class _RaceDetailView(QWidget):
 class MatchDetailView(QWidget):
     """Right-hand detail pane: stacked match-timeline + race-detail views."""
 
+    recordEdited = Signal(str)  # match_id
+
     def __init__(self, matches_dir: Path = DEFAULT_MATCHES_DIR) -> None:
         super().__init__()
         self._matches_dir = matches_dir
@@ -1391,8 +1573,9 @@ class MatchDetailView(QWidget):
         layout.setSpacing(0)
 
         self._stack = QStackedWidget()
-        self._timeline = _MatchTimelinePane()
+        self._timeline = _MatchTimelinePane(matches_dir=self._matches_dir)
         self._timeline.raceSelected.connect(self._on_race_selected)
+        self._timeline.editTableRequested.connect(self._on_edit_table)
         self._race_detail = _RaceDetailView()
         self._race_detail.backRequested.connect(self._show_timeline)
 
@@ -1406,6 +1589,7 @@ class MatchDetailView(QWidget):
 
     def set_matches_dir(self, matches_dir: Path) -> None:
         self._matches_dir = matches_dir
+        self._timeline._matches_dir = matches_dir
 
     def set_record(
         self,
@@ -1431,6 +1615,19 @@ class MatchDetailView(QWidget):
 
     def _show_timeline(self) -> None:
         self._stack.setCurrentIndex(0)
+
+    def _on_edit_table(self) -> None:
+        record = self._current_record
+        if record is None:
+            return
+        dialog = _TableEditDialog(record, self._matches_dir, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            try:
+                updated = MatchRecord.load(self._matches_dir / record.match_id)
+            except (OSError, ValueError, KeyError):
+                updated = record
+            self.set_record(updated)
+            self.recordEdited.emit(record.match_id)
 
     def _on_race_selected(self, race_number: int) -> None:
         record = self._current_record
@@ -1508,6 +1705,7 @@ class MatchHistoryView(QWidget):
         split.addWidget(self._list)
 
         self._detail = MatchDetailView(matches_dir=self._matches_dir)
+        self._detail.recordEdited.connect(lambda _mid: self.refresh())
         split.addWidget(self._detail, stretch=1)
 
         root.addLayout(split, stretch=1)

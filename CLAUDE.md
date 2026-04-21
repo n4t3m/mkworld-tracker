@@ -20,7 +20,9 @@ src/mktracker/
 ├── gemini_rank.py               # Async Gemini call: race placement rank from gameplay frame
 ├── gemini_results.py            # Async Gemini call: race results from multiple scrolling frames
 ├── gemini_match_results.py      # Async Gemini call: final match results from CONGRATULATIONS screen
+├── lorenzi_text.py              # Round-trip FinalStandings ↔ Lorenzi-style editor text
 ├── match_record.py              # Standardised JSON schema for persisted matches (history store)
+├── table_generator.py           # Pillow-based Lorenzi-style results-table PNG renderer
 ├── capture/
 │   └── video_source.py          # Camera enumeration (DirectShow) + VideoCapture wrapper
 ├── detection/
@@ -141,7 +143,8 @@ tests/
 - Row backgrounds are lightened with a 58% white blend over the clan colour for contrast; all name/rank text is pure black.
 - Japanese/CJK player names (Hiragana, Katakana, fullwidth/halfwidth forms) automatically use NotoSans JP as a fallback font.
 - `scripts/generate_table.py` is a standalone CLI for generating a table from any saved match: `uv run python -m scripts.generate_table [match_id]`. Saves `table.png` alongside the match folder.
-- Not yet wired into the UI — the planned integration point is a "Generate Table" button in the Match History detail view.
+- **Live integration**: `GameStateMachine._save_match_record()` renders `table.png` into the match folder whenever `record.final_standings` is set — both in the live save path and the stale-callback path (`_apply_stale_match_results`). The table is written **before** `match.json` so the match-history tick loop (mtime-gated) never sees an updated record without its table. Rendering failures are logged but never block the JSON save.
+- **Table editor**: `src/mktracker/lorenzi_text.py` round-trips `FinalStandings` to/from the Lorenzi line format (tag on one line, then `<name> <score>` rows; blank lines separate teams; scores may be `+`/`-` expressions like `70+20+8`). In the Match History detail pane, the `_TableImageCard` has "Copy Table" and "Edit Table" buttons in its header. "Edit Table" opens `_TableEditDialog` (QPlainTextEdit prefilled via `standings_to_text`); Save parses via `text_to_standings`, overwrites `record.final_standings` (places re-derived by score desc, winner = highest-points team, mode inferred from team count), regenerates `table.png`, and writes `match.json`. "Copy Table" puts the full-resolution PNG on the system clipboard via `QGuiApplication.clipboard().setPixmap()`. Edits are disabled for live matches.
 
 ## Match Record Backfill
 - Legacy match folders that predate the `match.json` persistence layer can be reconstructed via `scripts/backfill_match_records.py`. It walks `matches/`, skips folders that already have `match.json` (unless `--force`), and rebuilds the record from whatever frames are saved on disk.

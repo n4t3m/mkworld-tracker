@@ -31,6 +31,9 @@ from mktracker.match_record import (
     RaceRecord,
     TeamGroup,
 )
+from mktracker.table_generator import generate_table
+
+TABLE_FILE = "table.png"
 
 logger = logging.getLogger(__name__)
 
@@ -715,9 +718,26 @@ class GameStateMachine:
             return  # strict rule: never persist a match that wasn't started
         try:
             record = self._build_match_record()
+        except Exception:
+            logger.exception("Failed to build match record")
+            return
+        if record.final_standings is not None:
+            self._save_match_table(self._match_dir, record)
+        try:
             record.save(self._match_dir)
         except Exception:
             logger.exception("Failed to save match record")
+
+    @staticmethod
+    def _save_match_table(match_dir: Path, record: MatchRecord) -> None:
+        """Render the Lorenzi-style results table and save it to
+        ``match_dir/table.png``. Safe to call whenever final standings are
+        present; logs and swallows any rendering error."""
+        try:
+            png = generate_table(record)
+            (match_dir / TABLE_FILE).write_bytes(png)
+        except Exception:
+            logger.exception("Failed to generate match table for %s", match_dir.name)
 
     def _build_match_record(self) -> MatchRecord:
         """Build a :class:`MatchRecord` snapshot of the current match."""
@@ -966,6 +986,8 @@ class GameStateMachine:
         if record.completed_at is None:
             record.completed_at = datetime.now().isoformat()
         assert match_dir is not None
+        if record.final_standings is not None:
+            self._save_match_table(match_dir, record)
         self._save_stale_record(match_dir, record)
         player_count = (
             len(record.final_standings.players)
