@@ -52,6 +52,11 @@ _EDGE_STRIP_MAX = 0.10
 _ROW_DENSITY_MIN = 0.15
 _ROW_HEIGHT_RATIO_MAX = 0.80
 
+# The FINISH! banner sits in the upper portion of the ROI.  Environment orange
+# (lava, fire, sand) accumulates in the lower half because it is below the
+# horizon line — so the orange centroid should be in the upper half of the ROI.
+_CENTROID_Y_MAX = 0.50
+
 
 class RaceFinishDetector:
     """Detects the FINISH! banner displayed at the end of a race."""
@@ -123,6 +128,12 @@ class RaceFinishDetector:
         row_density = np.count_nonzero(mask, axis=1) / mask.shape[1]
         rows_with_orange = int(np.count_nonzero(row_density >= _ROW_DENSITY_MIN))
         if rows_with_orange > _ROW_HEIGHT_RATIO_MAX * mask.shape[0]:
+            return False
+
+        # FINISH! text sits in the upper half of the ROI; environment orange
+        # (lava, fire) accumulates below the horizon and pushes the centroid low.
+        ys = np.where(mask > 0)[0]
+        if len(ys) > 0 and ys.mean() / mask.shape[0] > _CENTROID_Y_MAX:
             return False
 
         # The FINISH text has a red outline that gameplay orange lacks.
