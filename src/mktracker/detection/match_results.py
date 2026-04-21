@@ -97,7 +97,7 @@ _NT_BANNER_H_LO = 20        # yellow hue range (OpenCV H 0-179)
 _NT_BANNER_H_HI = 35
 _NT_BANNER_SAT_MIN = 150    # yellow must be saturated
 _NT_BANNER_VAL_MIN = 150    # yellow must be bright
-_NT_BANNER_RATIO_MIN = 0.05  # minimum yellow pixel fraction
+_NT_BANNER_RATIO_MIN = 0.09  # minimum yellow pixel fraction
 # Red/orange diagonal stripe behind the banner text.
 _NT_BANNER_RED_SAT_MIN = 120
 _NT_BANNER_RED_VAL_MIN = 80

@@ -49,6 +49,7 @@ def test_detects_no_teams_result_screen(filename):
     [
         "20260329_131323.png",  # Pure gameplay — golden temple track with yellow scene
         "20260329_144018.png",  # Pure gameplay — race with yellow "1st" badge
+        "bad_gameplay_naples.png",  # Naples street track — brick wall red + graffiti yellow
     ],
 )
 def test_rejects_gameplay_frame(filename):
