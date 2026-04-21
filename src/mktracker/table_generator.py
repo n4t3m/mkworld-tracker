@@ -390,8 +390,18 @@ def generate_table(record: MatchRecord) -> bytes:
     date = _raw_date if _raw_date else datetime.now()
     months   = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
     date_str = f"{date.day} {months[date.month - 1]} {date.year}"
+
+    header_parts = [date_str]
+    player_count = len(record.races[0].players) if record.races and record.races[0].players else None
+    team_count = len(clans) if not single_clan else None
+    if team_count is not None and player_count is not None:
+        header_parts.append(f"{team_count} teams \u00b7 {player_count} players")
+    elif player_count is not None:
+        header_parts.append(f"{player_count} players")
+    header_text = "   \u2014   ".join(header_parts)
+
     draw.text(
-        (TOTAL_W / 2, HEADER_H / 2), date_str,
+        (TOTAL_W / 2, HEADER_H / 2), header_text,
         fill=(255, 255, 255),
         font=_bold(roboto, HEADER_H * 0.65),
         anchor="mm",

@@ -879,6 +879,7 @@ class _TableImageCard(QFrame):
     """Embeds the generated Lorenzi-style results table image."""
 
     editRequested = Signal()
+    regenerateRequested = Signal()
 
     def __init__(self, path: Path, *, show_edit_button: bool = True) -> None:
         super().__init__()
@@ -924,6 +925,15 @@ class _TableImageCard(QFrame):
             edit_btn.setStyleSheet(btn_style)
             edit_btn.clicked.connect(self.editRequested.emit)
             header_row.addWidget(edit_btn)
+
+            regen_btn = QPushButton("Regenerate Table")
+            regen_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            regen_btn.setStyleSheet(btn_style)
+            regen_btn.setToolTip(
+                "Re-render table.png from the current match data",
+            )
+            regen_btn.clicked.connect(self.regenerateRequested.emit)
+            header_row.addWidget(regen_btn)
         layout.addLayout(header_row)
 
         image_label = QLabel()
@@ -966,6 +976,7 @@ class _MatchTimelinePane(QScrollArea):
 
     raceSelected = Signal(int)  # race_number
     editTableRequested = Signal()
+    regenerateTableRequested = Signal()
 
     def __init__(self, matches_dir: Path = DEFAULT_MATCHES_DIR) -> None:
         super().__init__()
@@ -1064,6 +1075,7 @@ class _MatchTimelinePane(QScrollArea):
         if record.final_standings is not None and table_path.exists():
             card = _TableImageCard(table_path, show_edit_button=not live)
             card.editRequested.connect(self.editTableRequested.emit)
+            card.regenerateRequested.connect(self.regenerateTableRequested.emit)
             self._layout.addWidget(card)
 
         races = sorted(record.races, key=lambda r: r.race_number)
@@ -1576,6 +1588,7 @@ class MatchDetailView(QWidget):
         self._timeline = _MatchTimelinePane(matches_dir=self._matches_dir)
         self._timeline.raceSelected.connect(self._on_race_selected)
         self._timeline.editTableRequested.connect(self._on_edit_table)
+        self._timeline.regenerateTableRequested.connect(self._on_regenerate_table)
         self._race_detail = _RaceDetailView()
         self._race_detail.backRequested.connect(self._show_timeline)
 
@@ -1628,6 +1641,24 @@ class MatchDetailView(QWidget):
                 updated = record
             self.set_record(updated)
             self.recordEdited.emit(record.match_id)
+
+    def _on_regenerate_table(self) -> None:
+        record = self._current_record
+        if record is None or record.final_standings is None:
+            return
+        match_dir = self._matches_dir / record.match_id
+        try:
+            png = generate_table(record)
+            (match_dir / "table.png").write_bytes(png)
+        except Exception as exc:
+            logger.exception("Failed to regenerate table")
+            QMessageBox.critical(
+                self, "Regenerate failed",
+                f"Could not regenerate table:\n{exc}",
+            )
+            return
+        self.set_record(record)
+        self.recordEdited.emit(record.match_id)
 
     def _on_race_selected(self, race_number: int) -> None:
         record = self._current_record
