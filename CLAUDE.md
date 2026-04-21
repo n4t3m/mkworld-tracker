@@ -40,6 +40,17 @@ src/mktracker/
 scripts/
 ├── backfill_match_records.py   # Rebuild match.json for legacy matches/ folders using Gemini + OCR
 └── generate_table.py           # CLI: generate a table PNG for a match by ID (or most recent)
+
+tests/
+├── conftest.py                 # stub_fonts fixture: patches font loading for CI-safe rendering tests
+├── test_match_record.py        # MatchRecord schema, round-trips, save/load, list_matches
+├── test_match_results.py       # MatchResultDetector (CONGRATULATIONS screen OCR)
+├── test_player_reader.py       # PlayerReader grid detection and cell OCR
+├── test_race_finish.py         # RaceFinishDetector HSV banner detection
+├── test_race_results.py        # RaceResultDetector placement parsing (teams & no-teams)
+├── test_state_machine_persistence.py  # match_record save/load through state machine transitions
+├── test_table_generator.py     # table_generator helpers + generate_table for all layout types
+└── test_track_select.py        # TrackSelectDetector screen detection and fuzzy track matching
 ```
 
 ## Architecture
@@ -148,6 +159,17 @@ scripts/
 - **Special Unicode characters** (☆, π, ★, ♪, ⊃) in player names are not reliably OCR'd by Tesseract (Gemini handles these well)
 - **Team-mode OCR quality**: text on coloured bars has only ~7-10 levels of V-channel contrast with the background, causing some names to be partially garbled
 - **FINISH! detection timing**: the FINISH banner is brief and can be missed if no frame captures it during the fast-sampling window (~100ms intervals)
+
+## Tests
+
+Run the full suite with:
+```bash
+uv run pytest tests/
+```
+
+- **`conftest.py`** — defines the `stub_fonts` session fixture, which patches `_ensure_font` (normally downloads TTF files) and `PIL.ImageFont.truetype` (normally opens them) so that `generate_table` rendering tests run without real font files in CI. A pre-built `load_default(size=20)` instance is created *before* the patch to avoid the recursion that would result from `load_default` calling `truetype` internally.
+- **`test_table_generator.py`** — 43 tests split into pure-function tests (no I/O: `_needs_cjk`, `_blend`, `_hsv2rgb`, `_clan_hsv`, `_build_clans`) and rendering integration tests (require `stub_fonts`: FFA, 2-, 3-, 4-team layouts, height scaling, CJK names, tied rankings, ISO date parsing).
+- All other test files use real fixture images from `tests/fixtures/` (tracked) and `testdata/` (gitignored).
 
 ## Test Data
 - `testdata/trackselected/` — 6 screenshots of track selection (filenames = track names)
