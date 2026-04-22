@@ -117,6 +117,19 @@ _TT_SCORES_VAL_MIN = 80
 _TT_RED_LEFT_RATIO_MIN = 0.10   # real screens: ~0.17–0.20; gameplay: <0.10
 _TT_BLUE_RIGHT_RATIO_MIN = 0.05  # real screens: ~0.10–0.13; gameplay: <0.02
 
+# Two-team banner stripe — the top ~10% of the screen is a solid coloured
+# banner on real result screens (red, blue, or dark grey for DRAW).  On
+# mid-race overall-standings screens, the red/blue team-score panels are
+# also visible but the top strip shows gameplay scenery (sky, track), so
+# no single banner colour dominates.
+_TT_BANNER_Y2 = 0.10
+_TT_BANNER_SAT_MIN = 120
+_TT_BANNER_VAL_MIN = 80
+_TT_BANNER_GRAY_SAT_MAX = 60
+_TT_BANNER_GRAY_VAL_LO = 30
+_TT_BANNER_GRAY_VAL_HI = 100
+_TT_BANNER_COVERAGE_MIN = 0.40   # real screens: >=0.63; mid-race: <0.25
+
 
 class MatchResultDetector:
     """Detect and read final match results from the CONGRATULATIONS! screen."""
@@ -330,10 +343,15 @@ class MatchResultDetector:
         screen is showing.
 
         The banner colour itself varies (red/blue for the winning team,
-        dark grey for a draw), so we instead detect the giant team-score
-        panels that appear together with the banner — a saturated red
-        panel on the left half and a saturated blue panel on the right
-        half of the area just below the banner.
+        dark grey for a draw), so we detect it in two parts:
+
+        1. The giant team-score panels just below the banner — a
+           saturated red panel on the left and blue panel on the right.
+        2. A solid banner stripe occupying the top ~10% of the screen,
+           which must be dominated by a single colour (red, blue, or
+           dark grey).  This rejects mid-race overall-standings screens,
+           which still show the red/blue score panels but leave gameplay
+           scenery visible at the top.
         """
         h, w = frame.shape[:2]
         region = frame[int(h * _TT_SCORES_Y1):int(h * _TT_SCORES_Y2), :]
@@ -352,10 +370,36 @@ class MatchResultDetector:
             & (hsv_r[:, :, 1] > _TT_SCORES_SAT_MIN)
             & (hsv_r[:, :, 2] > _TT_SCORES_VAL_MIN)
         )
-        return (
-            float(red_mask.mean()) >= _TT_RED_LEFT_RATIO_MIN
-            and float(blue_mask.mean()) >= _TT_BLUE_RIGHT_RATIO_MIN
+        if (
+            float(red_mask.mean()) < _TT_RED_LEFT_RATIO_MIN
+            or float(blue_mask.mean()) < _TT_BLUE_RIGHT_RATIO_MIN
+        ):
+            return False
+
+        top = frame[:int(h * _TT_BANNER_Y2), :]
+        hsv_t = cv2.cvtColor(top, cv2.COLOR_BGR2HSV)
+        gray_t = cv2.cvtColor(top, cv2.COLOR_BGR2GRAY)
+        top_red = (
+            ((hsv_t[:, :, 0] < 15) | (hsv_t[:, :, 0] > 160))
+            & (hsv_t[:, :, 1] > _TT_BANNER_SAT_MIN)
+            & (hsv_t[:, :, 2] > _TT_BANNER_VAL_MIN)
         )
+        top_blue = (
+            (hsv_t[:, :, 0] >= 90) & (hsv_t[:, :, 0] <= 130)
+            & (hsv_t[:, :, 1] > _TT_BANNER_SAT_MIN)
+            & (hsv_t[:, :, 2] > _TT_BANNER_VAL_MIN)
+        )
+        top_gray = (
+            (hsv_t[:, :, 1] < _TT_BANNER_GRAY_SAT_MAX)
+            & (gray_t > _TT_BANNER_GRAY_VAL_LO)
+            & (gray_t < _TT_BANNER_GRAY_VAL_HI)
+        )
+        dominant = max(
+            float(top_red.mean()),
+            float(top_blue.mean()),
+            float(top_gray.mean()),
+        )
+        return dominant >= _TT_BANNER_COVERAGE_MIN
 
     # ------------------------------------------------------------------
     # Column OCR

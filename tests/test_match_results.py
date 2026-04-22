@@ -122,6 +122,7 @@ def test_rejects_two_teams_screen_on_no_teams_path():
     "filename",
     [
         "twoteams_banner_red_win.png",   # CONGRATULATIONS!, red team won (red banner)
+        "twoteams_banner_red_win_alt.png",  # CONGRATULATIONS!, red team won (red banner, different track)
         "twoteams_banner_blue_win.png",  # CONGRATULATIONS!, blue team won (blue banner)
         "twoteams_result.png",           # CONGRATULATIONS!, two teams
         "20260329_174714.png",           # CONGRATULATIONS!, two teams
@@ -144,6 +145,9 @@ def test_two_teams_banner_detected(filename):
         "12presultscreen.png",   # No-teams result screen — wrong layout
         "nicetryvariant.png",    # No-teams result screen — wrong layout
         "20260329_162559.png",   # No-teams 24-player result screen
+        # Two-team mid-race overall standings — red/blue score panels are
+        # present but the banner stripe at the top is gameplay scenery.
+        "bad_twoteams_midrace_standings.png",
     ],
 )
 def test_two_teams_banner_rejects_non_team_screens(filename):
@@ -151,3 +155,15 @@ def test_two_teams_banner_rejects_non_team_screens(filename):
     assert not _detector._has_result_banner(frame, teams="Two Teams"), (
         f"Two-team banner check should reject {filename}"
     )
+
+
+def test_rejects_two_teams_midrace_standings():
+    """Mid-race overall standings must not be detected as a match banner.
+
+    The overall-standings screen during a two-team match shows the red and
+    blue team-score panels on top of live gameplay scenery, with no banner
+    stripe at the top.  The detector must reject it.
+    """
+    frame = _load("bad_twoteams_midrace_standings.png")
+    result = _detector.detect(frame, teams="Two Teams", player_count=12)
+    assert result is None

@@ -9,31 +9,31 @@ import pytest
 
 from mktracker.detection.player_reader import PlayerReader
 
-DEBUG_DIR = os.path.join(
+FIXTURES_DIR = os.path.join(
     os.path.dirname(__file__),
-    "..",
-    "matches",
-    "20260329_110511",
+    "fixtures",
+    "player_reader",
 )
 
-# The 12 players present in every screenshot (races 1-10).
-# Races 11-12 have roster changes (hawkey leaves, Axelfy joins).
+# The 12 players present in every screenshot — a two-team match
+# (>€> vs Ly) with a static roster across all 12 races.  There are
+# two distinct in-game "Kod49" players, so the name appears twice.
 EXPECTED_PLAYERS = [
     "nthn",
+    "Azusa",
+    "chko",
+    "Kod49",
     "Spritz",
     "Kod49",
-    "Azusa",
-    "hawkey",
-    "choko",
-    "RK sombluz",
-    "RK AciiD",
-    "RK Pero",
-    "RK Mimosa",
-    "RKCASTILLA",
-    "RK Jamal",
+    "Ly Raised",
+    "Ly Beury",
+    "Ly Viny",
+    "Ly Bert",
+    "Ly Edu",
+    "Ly Lara",
 ]
 
-PLAYER_FILES = sorted(glob.glob(os.path.join(DEBUG_DIR, "race_*_players.png")))
+PLAYER_FILES = sorted(glob.glob(os.path.join(FIXTURES_DIR, "race_*_players.png")))
 
 
 def _name_matches(detected: str, expected: str) -> bool:
@@ -94,16 +94,17 @@ class TestPlayerReader:
         players = reader.read_players(frame, teams=True)
         names = [p.name for p in players]
 
-        # Races 11-12 have a roster change: hawkey -> Axelfy
-        basename = os.path.basename(image_path)
-        race_num = int(basename.split("_")[1])
-        expected = list(EXPECTED_PLAYERS)
-        if race_num >= 11:
-            expected.remove("hawkey")
-
-        missing = []
-        for exp in expected:
-            if not any(_name_matches(det, exp) for det in names):
+        # The roster is static across all 12 races in this match.  Two
+        # distinct players share the in-game name "Kod49", so match each
+        # expected name to a distinct detection (multiset containment).
+        remaining = list(names)
+        missing: list[str] = []
+        for exp in EXPECTED_PLAYERS:
+            for i, det in enumerate(remaining):
+                if _name_matches(det, exp):
+                    remaining.pop(i)
+                    break
+            else:
                 missing.append(exp)
 
         assert not missing, (
