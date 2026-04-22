@@ -148,6 +148,14 @@ def test_two_teams_banner_detected(filename):
         # Two-team mid-race overall standings — red/blue score panels are
         # present but the banner stripe at the top is gameplay scenery.
         "bad_twoteams_midrace_standings.png",
+        # Pre-race player-list screens — scattered blue UI elements in the
+        # top strip previously tripped the pixel-fraction coverage check.
+        "bad_player_list_06.png",
+        "bad_player_list_07.png",
+        "bad_player_list_12.png",
+        # FINISH! frame with a blue sky — high blue coverage in the top
+        # strip but no solid horizontal stripe.
+        "bad_finish_banner_blue_sky.png",
     ],
 )
 def test_two_teams_banner_rejects_non_team_screens(filename):
@@ -167,3 +175,5 @@ def test_rejects_two_teams_midrace_standings():
     frame = _load("bad_twoteams_midrace_standings.png")
     result = _detector.detect(frame, teams="Two Teams", player_count=12)
     assert result is None
+
+

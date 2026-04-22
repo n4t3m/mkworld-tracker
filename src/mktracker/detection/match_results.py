@@ -118,17 +118,21 @@ _TT_RED_LEFT_RATIO_MIN = 0.10   # real screens: ~0.17–0.20; gameplay: <0.10
 _TT_BLUE_RIGHT_RATIO_MIN = 0.05  # real screens: ~0.10–0.13; gameplay: <0.02
 
 # Two-team banner stripe — the top ~10% of the screen is a solid coloured
-# banner on real result screens (red, blue, or dark grey for DRAW).  On
-# mid-race overall-standings screens, the red/blue team-score panels are
-# also visible but the top strip shows gameplay scenery (sky, track), so
-# no single banner colour dominates.
+# banner on real result screens (red, blue, or dark grey for DRAW).  We
+# look for a contiguous run of rows that are ≥85% a single banner colour:
+# real banners produce a run covering ≥10% of the top strip (grey DRAW
+# banner is the weakest at ~0.10; red/blue winners are ≥0.30).  Scenery
+# with scattered red/blue UI elements (player list, FINISH! frame with
+# blue sky, mid-race standings) has high total coverage but zero solid
+# rows, so row-run is a much cleaner discriminator than pixel fraction.
 _TT_BANNER_Y2 = 0.10
 _TT_BANNER_SAT_MIN = 120
 _TT_BANNER_VAL_MIN = 80
 _TT_BANNER_GRAY_SAT_MAX = 60
 _TT_BANNER_GRAY_VAL_LO = 30
 _TT_BANNER_GRAY_VAL_HI = 100
-_TT_BANNER_COVERAGE_MIN = 0.40   # real screens: >=0.63; mid-race: <0.25
+_TT_BANNER_ROW_COVERAGE_MIN = 0.85   # per-row fraction to count as "solid"
+_TT_BANNER_RUN_FRAC_MIN = 0.08       # consecutive solid rows (fraction of strip)
 
 
 class MatchResultDetector:
@@ -394,12 +398,27 @@ class MatchResultDetector:
             & (gray_t > _TT_BANNER_GRAY_VAL_LO)
             & (gray_t < _TT_BANNER_GRAY_VAL_HI)
         )
-        dominant = max(
-            float(top_red.mean()),
-            float(top_blue.mean()),
-            float(top_gray.mean()),
+        best_run = max(
+            MatchResultDetector._longest_solid_run(top_red),
+            MatchResultDetector._longest_solid_run(top_blue),
+            MatchResultDetector._longest_solid_run(top_gray),
         )
-        return dominant >= _TT_BANNER_COVERAGE_MIN
+        return best_run >= _TT_BANNER_RUN_FRAC_MIN
+
+    @staticmethod
+    def _longest_solid_run(mask: np.ndarray) -> float:
+        """Return the longest run of rows where ≥85% of the row is True,
+        as a fraction of the mask's height."""
+        row_cov = mask.mean(axis=1)
+        best = cur = 0
+        for c in row_cov:
+            if c > _TT_BANNER_ROW_COVERAGE_MIN:
+                cur += 1
+                if cur > best:
+                    best = cur
+            else:
+                cur = 0
+        return best / len(row_cov) if len(row_cov) else 0.0
 
     # ------------------------------------------------------------------
     # Column OCR
