@@ -16,6 +16,7 @@ A Python app that watches a capture card's video feed of Mario Kart and automati
 src/mktracker/
 ├── main.py                      # Entry point, logging setup (INFO level), QApplication
 ├── state_machine.py             # GameStateMachine with 8 states, debug frame saving
+├── debug_config.py              # Debug-mode flag persistence (.env)
 ├── gemini_client.py             # Gemini API key/model persistence (.env) and health check
 ├── gemini_rank.py               # Async Gemini call: race placement rank from gameplay frame
 ├── gemini_results.py            # Async Gemini call: race results from multiple scrolling frames
@@ -103,7 +104,7 @@ tests/
 
 ## Match Settings UI
 - **Live View right panel** (270px wide): dropdowns for Class, Teams, Items, COM, Intermission and a spinbox for Race Count. On startup, UI defaults are pushed to the state machine (settings always available even when advancing past match detection). When match settings are detected from video, UI updates to show detected values (label: "Detected"). Reset State wipes detected settings and re-applies current UI values as manual. The `teams` setting controls which race result preprocessing path is used.
-- **Settings tab** (top-level): Gemini API key field (password-masked, with eye toggle to reveal), model name field (defaults to `gemma-3-27b-it`), Save button, and Verify Key button. Status label shows verification result in green/red/grey. A `●` dot indicator in the Live View toolbar reflects the API key status at a glance without switching tabs. Auto-verifies on startup if a key is stored.
+- **Settings tab** (top-level): Gemini API key field (password-masked, with eye toggle to reveal), model name field (defaults to `gemma-3-27b-it`), Save button, and Verify Key button. Status label shows verification result in green/red/grey. A `●` dot indicator in the Live View toolbar reflects the API key status at a glance without switching tabs. Auto-verifies on startup if a key is stored. Also hosts a **Debug** group with an "Enable debug mode" checkbox — toggling it persists `DEBUG_MODE=true|false` to `.env` via `debug_config.py` and updates `GameStateMachine.debug_mode` live. The state machine reads the flag from `.env` on init; downstream code can branch on `state_machine.debug_mode` to emit additional per-race logging.
 
 ## Gemini API
 - Key and model stored in `.env` (gitignored) via `python-dotenv`

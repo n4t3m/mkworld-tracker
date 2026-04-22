@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from mktracker.capture.video_source import VideoCapture, enumerate_sources
+from mktracker.debug_config import load_debug_mode, save_debug_mode
 from mktracker.detection.match_settings import MatchSettings
 from mktracker.gemini_client import (
     SUGGESTED_MODELS,
@@ -302,6 +304,21 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(model_group)
 
+        # --- Debug group -----------------------------------------------------
+        debug_group = QGroupBox("Debug")
+        debug_layout = QVBoxLayout(debug_group)
+        debug_layout.setSpacing(6)
+
+        self._debug_mode_check = QCheckBox("Enable debug mode")
+        self._debug_mode_check.setToolTip(
+            "Emit additional logging during a race. Persisted in .env."
+        )
+        self._debug_mode_check.setChecked(self._state_machine.debug_mode)
+        self._debug_mode_check.toggled.connect(self._on_debug_mode_toggled)
+        debug_layout.addWidget(self._debug_mode_check)
+
+        layout.addWidget(debug_group)
+
         layout.addStretch()
 
         # Load stored values and auto-verify if a key exists
@@ -342,6 +359,14 @@ class MainWindow(QMainWindow):
         model = model.strip()
         if model:
             save_model(model)
+
+    def _on_debug_mode_toggled(self, checked: bool) -> None:
+        save_debug_mode(checked)
+        self._state_machine.debug_mode = checked
+        self.statusBar().showMessage(
+            f"Debug mode {'enabled' if checked else 'disabled'}", 2000,
+        )
+        logger.info("Debug mode %s", "enabled" if checked else "disabled")
 
     def _on_toggle_key_visibility(self, checked: bool) -> None:
         mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password

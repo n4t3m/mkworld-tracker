@@ -19,6 +19,7 @@ from mktracker.detection.race_finish import RaceFinishDetector
 from mktracker.detection.race_rank import RaceRankDetector
 from mktracker.detection.race_results import RaceResultDetector
 from mktracker.detection.track_select import TrackSelectDetector
+from mktracker.debug_config import load_debug_mode
 from mktracker.gemini_client import load_api_key
 from mktracker.gemini_match_results import request_match_results
 from mktracker.gemini_rank import request_race_rank
@@ -108,7 +109,11 @@ class GameStateMachine:
         self._gemini_match_results: dict | None = None
         self._match_banner_seen_at: float | None = None
 
-        logger.info("State: WAITING_FOR_MATCH")
+        self.debug_mode: bool = load_debug_mode()
+
+        logger.info(
+            "State: WAITING_FOR_MATCH (debug_mode=%s)", self.debug_mode,
+        )
 
     # -- public properties -------------------------------------------------
 
