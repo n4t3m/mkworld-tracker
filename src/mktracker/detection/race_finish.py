@@ -50,14 +50,19 @@ _EDGE_STRIP_MAX = 0.10
 # The FINISH! text lives in a bounded horizontal band (~2/3 of ROI height).
 # Tall gameplay shapes (gliders, terrain) fill nearly the entire ROI vertically.
 _ROW_DENSITY_MIN = 0.15
-_ROW_HEIGHT_RATIO_MAX = 0.80
+# Relaxed enough to accept genuine FINISH! banners rendered over orange
+# environments (desert tracks, pink flooring with orange signage) where
+# background orange pushes the ROI's vertical orange coverage high.
+# Gliders and sustained gameplay orange still get rejected via the
+# centroid-y and top-quartile-row-density checks below.
+_ROW_HEIGHT_RATIO_MAX = 0.95
 
-# The FINISH! banner produces a long contiguous run of rows each densely
-# filled with orange (the filled letters cover the banner's full width).
-# Scattered orange from background signs/scenery breaks the run into short
-# segments even when the overall orange ratio looks banner-like.
-_DENSE_ROW_DENSITY = 0.30
-_DENSE_ROW_RUN_MIN = 0.35
+# The FINISH! banner's letter rows are each densely filled with orange (the
+# filled letter bodies span most of the banner width).  Background signs
+# combine with scattered scenery orange to produce the same overall ratio
+# but a thinner peak — require the 75th-percentile row density (i.e. the
+# densest quartile of rows) to be at least this high.
+_TOP_QUARTILE_ROW_DENSITY_MIN = 0.385
 
 # The FINISH! banner sits in the upper portion of the ROI.  Environment orange
 # (lava, fire, sand) accumulates in the lower half because it is below the
@@ -137,18 +142,10 @@ class RaceFinishDetector:
         if rows_with_orange > _ROW_HEIGHT_RATIO_MAX * mask.shape[0]:
             return False
 
-        # Require a contiguous run of densely-filled rows. Background signs
-        # and scattered scenery orange break into short disjoint segments.
-        dense_rows = row_density >= _DENSE_ROW_DENSITY
-        best_dense_run = current_dense_run = 0
-        for is_dense in dense_rows:
-            if is_dense:
-                current_dense_run += 1
-                if current_dense_run > best_dense_run:
-                    best_dense_run = current_dense_run
-            else:
-                current_dense_run = 0
-        if best_dense_run < _DENSE_ROW_RUN_MIN * mask.shape[0]:
+        # Background signage can produce a banner-shaped overall orange
+        # ratio but without the concentrated peak that filled banner letters
+        # create.  Require the top-quartile row density to exceed a floor.
+        if float(np.percentile(row_density, 75)) < _TOP_QUARTILE_ROW_DENSITY_MIN:
             return False
 
         # FINISH! text sits in the upper half of the ROI; environment orange

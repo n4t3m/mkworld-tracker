@@ -24,6 +24,22 @@ def _load(name: str):
     "filename",
     [
         "finish_good.png",
+        "finish_good_lava.png",
+        "finish_good_chain_chomp.png",
+        "finish_good_dockyard.png",
+        "finish_good_temple.png",
+        "finish_good_0419_01.png",
+        "finish_good_0419_02.png",
+        "finish_good_0419_04.png",
+        "finish_good_0419_05.png",
+        "finish_good_0419_06.png",
+        "finish_good_0419_07.png",
+        "finish_good_0419_08.png",
+        "finish_good_0418_02.png",
+        "finish_good_0418_03.png",
+        "finish_good_0418_04.png",
+        "finish_good_0418_06.png",
+        "finish_good_0418_07.png",
     ],
 )
 def test_detects_finish_screen(filename):
