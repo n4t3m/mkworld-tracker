@@ -52,6 +52,13 @@ _EDGE_STRIP_MAX = 0.10
 _ROW_DENSITY_MIN = 0.15
 _ROW_HEIGHT_RATIO_MAX = 0.80
 
+# The FINISH! banner produces a long contiguous run of rows each densely
+# filled with orange (the filled letters cover the banner's full width).
+# Scattered orange from background signs/scenery breaks the run into short
+# segments even when the overall orange ratio looks banner-like.
+_DENSE_ROW_DENSITY = 0.30
+_DENSE_ROW_RUN_MIN = 0.35
+
 # The FINISH! banner sits in the upper portion of the ROI.  Environment orange
 # (lava, fire, sand) accumulates in the lower half because it is below the
 # horizon line — so the orange centroid should be in the upper half of the ROI.
@@ -128,6 +135,20 @@ class RaceFinishDetector:
         row_density = np.count_nonzero(mask, axis=1) / mask.shape[1]
         rows_with_orange = int(np.count_nonzero(row_density >= _ROW_DENSITY_MIN))
         if rows_with_orange > _ROW_HEIGHT_RATIO_MAX * mask.shape[0]:
+            return False
+
+        # Require a contiguous run of densely-filled rows. Background signs
+        # and scattered scenery orange break into short disjoint segments.
+        dense_rows = row_density >= _DENSE_ROW_DENSITY
+        best_dense_run = current_dense_run = 0
+        for is_dense in dense_rows:
+            if is_dense:
+                current_dense_run += 1
+                if current_dense_run > best_dense_run:
+                    best_dense_run = current_dense_run
+            else:
+                current_dense_run = 0
+        if best_dense_run < _DENSE_ROW_RUN_MIN * mask.shape[0]:
             return False
 
         # FINISH! text sits in the upper half of the ROI; environment orange

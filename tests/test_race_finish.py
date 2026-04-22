@@ -48,6 +48,7 @@ def test_detects_finish_screen(filename):
         "bad_false_finish_1.png",
         "bad_false_finish_2.png",
         "bad_gameplay_glider.png",
+        "bad_gameplay_yoshi_sign.png",
     ],
 )
 def test_rejects_non_finish(filename):
