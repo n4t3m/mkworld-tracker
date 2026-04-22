@@ -126,6 +126,7 @@ tests/
 - Per-race subfolder `race_NN/` contains: `track.png`, `players.png`, `finish.png`, `rank.png`, `placement_NN.png` (race result frames)
 - Gemini request/response logs saved alongside frames: `gemini_rank.txt`, `gemini_results.txt`, `gemini_match_results.txt`
 - Race result frames saved to `debug_placements/` (gitignored) when new placements are captured (temporary debugging)
+- **Debug mode** (`DEBUG_MODE=true` in `.env`, or via the Settings tab checkbox): during `READING_RACE_RESULTS` (Gemini path), the state machine maintains a 5-frame rolling buffer of frames seen *before* the first placement burst, and continues sampling for 5 frames *after* the burst ends before transitioning out. These context frames are written to `<race_dir>/debug_placements/pre_NN.png` and `post_NN.png`. Adds ~500ms (5 fast-sample ticks) to the post-burst transition; otherwise no behavioral change.
 
 ## Match History Persistence
 - Each match folder under `matches/<timestamp>/` also contains a `match.json` written by the state machine — the standardised, on-disk representation of the match. This is the data backing the match history UI (including the live, in-progress match); the debug folder structure doubles as the history store.

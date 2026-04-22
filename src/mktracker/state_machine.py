@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import dataclasses
 import logging
 import re
@@ -45,6 +46,10 @@ _MATCH_START_DELAY = 5.0
 _MATCHES_DIR = Path("matches")
 _DEBUG_FINISH_DIR = Path("debug_finish")
 _DEBUG_RANK_DIR = Path("debug_rank")
+
+# Number of frames before/after the placement burst to save when debug mode
+# is enabled. Saved into <race_dir>/debug_placements/.
+_DEBUG_PLACEMENT_CONTEXT = 5
 
 
 class GameState(Enum):
@@ -105,6 +110,13 @@ class GameStateMachine:
         self._race_placement_quality: dict[int, int] = {}
         self._seen_race_results = False
         self._result_frames: list[np.ndarray] = []
+        # Debug-mode rolling buffer of frames seen *before* the first
+        # placement frame, plus counters for the post-burst capture window.
+        self._pre_results_buffer: collections.deque[np.ndarray] = collections.deque(
+            maxlen=_DEBUG_PLACEMENT_CONTEXT,
+        )
+        self._pre_results_dumped: bool = False
+        self._post_results_count: int = 0
         self._match_final_results: list[tuple[str, int]] | None = None
         self._gemini_match_results: dict | None = None
         self._match_banner_seen_at: float | None = None
@@ -189,6 +201,9 @@ class GameStateMachine:
         self._race_placement_quality = {}
         self._seen_race_results = False
         self._result_frames = []
+        self._pre_results_buffer.clear()
+        self._pre_results_dumped = False
+        self._post_results_count = 0
         self._match_final_results = None
         self._gemini_match_results = None
         self._match_banner_seen_at = None
@@ -354,6 +369,9 @@ class GameStateMachine:
         self._race_placement_quality = {}
         self._seen_race_results = False
         self._result_frames = []
+        self._pre_results_buffer.clear()
+        self._pre_results_dumped = False
+        self._post_results_count = 0
         self._transition(GameState.DETECTING_RACE_RANK)
 
     def _handle_detecting_rank(self, frame: np.ndarray) -> None:
@@ -436,6 +454,9 @@ class GameStateMachine:
         has_results = self._result_detector.has_race_results(frame)
 
         if has_results:
+            if self.debug_mode and not self._pre_results_dumped:
+                self._dump_pre_placement_buffer()
+                self._pre_results_dumped = True
             self._seen_race_results = True
             self._result_frames.append(frame.copy())
             frame_num = len(self._result_frames)
@@ -444,10 +465,19 @@ class GameStateMachine:
                 "Collected race result frame %d for Gemini", frame_num,
             )
         elif self._seen_race_results:
+            if self.debug_mode and self._post_results_count < _DEBUG_PLACEMENT_CONTEXT:
+                self._post_results_count += 1
+                self._save_post_placement_frame(frame, self._post_results_count)
+                if self._post_results_count < _DEBUG_PLACEMENT_CONTEXT:
+                    return  # keep sampling for the rest of the post-burst window
             logger.info("Overall standings detected — sending %d frames to Gemini",
                         len(self._result_frames))
             self._finalise_race_placements()
             self._transition(self._state_after_race_results())
+        elif self.debug_mode:
+            # Pre-placement window: keep a rolling buffer of the most recent
+            # frames so we can dump them once placements first appear.
+            self._pre_results_buffer.append(frame.copy())
 
     def _handle_reading_results_ocr(self, frame: np.ndarray) -> None:
         """Original OCR-based race results reading."""
@@ -1013,6 +1043,35 @@ class GameStateMachine:
         race_dir = self._match_dir / f"race_{race_num:02d}"
         race_dir.mkdir(exist_ok=True)
         return race_dir
+
+    def _debug_placements_dir(self, race_num: int) -> Path:
+        d = self._race_dir(race_num) / "debug_placements"
+        d.mkdir(exist_ok=True)
+        return d
+
+    def _dump_pre_placement_buffer(self) -> None:
+        """Write the rolling pre-placement frame buffer to
+        ``<race_dir>/debug_placements/pre_NN.png``. Called when the first
+        placement frame arrives in debug mode."""
+        if not self._pre_results_buffer:
+            return
+        race_num = len(self._races)
+        out_dir = self._debug_placements_dir(race_num)
+        for i, buf in enumerate(self._pre_results_buffer, 1):
+            cv2.imwrite(str(out_dir / f"pre_{i:02d}.png"), buf)
+        logger.info(
+            "Debug: saved %d pre-placement frames for race %d",
+            len(self._pre_results_buffer), race_num,
+        )
+        self._pre_results_buffer.clear()
+
+    def _save_post_placement_frame(self, frame: np.ndarray, n: int) -> None:
+        race_num = len(self._races)
+        out_dir = self._debug_placements_dir(race_num)
+        cv2.imwrite(str(out_dir / f"post_{n:02d}.png"), frame)
+        logger.debug(
+            "Debug: saved post-placement frame %d for race %d", n, race_num,
+        )
 
     def _save_race_frame(self, frame: np.ndarray, race_num: int, label: str) -> None:
         race_dir = self._race_dir(race_num)
