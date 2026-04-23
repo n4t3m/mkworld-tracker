@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 from mktracker.capture.video_source import VideoCapture, enumerate_sources
 from mktracker.debug_config import load_debug_mode, save_debug_mode
 from mktracker.detection.match_settings import MatchSettings
-from mktracker.discord_webhook import load_webhook_url, save_webhook_url
+from mktracker.discord_webhook import load_webhook_url, save_webhook_url, send_message
 from mktracker.gemini_client import (
     SUGGESTED_MODELS,
     load_api_key,
@@ -56,6 +56,44 @@ class _VerifyThread(QThread):
 
     def run(self) -> None:
         ok, msg = verify_api_key(self._key, self._model)
+        self.finished.emit(ok, msg)
+
+
+class _WebhookPingThread(QThread):
+    """Posts a test message to a Discord webhook off the main thread."""
+    finished = Signal(bool, str)  # (ok, message)
+
+    def __init__(self, url: str) -> None:
+        super().__init__()
+        self._url = url
+
+    def run(self) -> None:
+        import time
+
+        unix_ts = int(time.time())
+        embed = {
+            "title": "🏁 Webhook Connected",
+            "description": (
+                "MKWorld Tracker is successfully connected to this channel.\n"
+                "Live race updates will appear here during matches."
+            ),
+            "color": 0x2ECC71,
+            "fields": [
+                {"name": "Status", "value": "✅ Online", "inline": True},
+                {"name": "Source", "value": "Settings → Send Test", "inline": True},
+                {
+                    "name": "Sent",
+                    "value": f"<t:{unix_ts}:F> (<t:{unix_ts}:R>)",
+                    "inline": False,
+                },
+            ],
+            "footer": {"text": "MKWorld Tracker"},
+        }
+        ok, msg = send_message(
+            self._url,
+            embeds=[embed],
+            username="MKWorld Tracker",
+        )
         self.finished.emit(ok, msg)
 
 logger = logging.getLogger(__name__)
@@ -327,6 +365,13 @@ class MainWindow(QMainWindow):
         webhook_save_btn.clicked.connect(self._on_save_webhook_url)
         webhook_row.addWidget(webhook_save_btn)
 
+        self._webhook_ping_btn = QPushButton("Send Test")
+        self._webhook_ping_btn.setToolTip(
+            "Posts a test message to the webhook to confirm it works."
+        )
+        self._webhook_ping_btn.clicked.connect(self._on_ping_webhook)
+        webhook_row.addWidget(self._webhook_ping_btn)
+
         webhook_layout.addLayout(webhook_row)
 
         self._webhook_status_label = QLabel()
@@ -438,6 +483,29 @@ class MainWindow(QMainWindow):
     def _on_toggle_webhook_visibility(self, checked: bool) -> None:
         mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
         self._webhook_edit.setEchoMode(mode)
+
+    def _on_ping_webhook(self) -> None:
+        url = self._webhook_edit.text().strip()
+        if not url:
+            self._set_webhook_status(False, "No webhook URL entered.")
+            return
+        if hasattr(self, "_webhook_ping_thread") and self._webhook_ping_thread.isRunning():
+            return
+        self._set_webhook_status(None, "Sending test message…")
+        self._webhook_ping_btn.setEnabled(False)
+        self._webhook_ping_thread = _WebhookPingThread(url)
+        self._webhook_ping_thread.finished.connect(self._on_ping_done)
+        self._webhook_ping_thread.start()
+
+    def _on_ping_done(self, ok: bool, message: str) -> None:
+        self._webhook_ping_btn.setEnabled(True)
+        if ok:
+            self._set_webhook_status(True, "Test message delivered — check your Discord channel.")
+            self.statusBar().showMessage("Discord webhook test sent", 2500)
+            logger.info("Discord webhook test message delivered.")
+        else:
+            self._set_webhook_status(False, f"Test failed: {message}")
+            logger.warning("Discord webhook test failed: %s", message)
 
     def _on_verify_api_key(self) -> None:
         key = self._api_key_edit.text().strip()
