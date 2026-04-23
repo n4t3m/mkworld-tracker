@@ -33,6 +33,7 @@ from mktracker.detection.match_settings import MatchSettings
 from mktracker.discord_webhook import (
     EVENT_MATCH_END,
     EVENT_MATCH_START,
+    EVENT_RACE_RESULTS,
     load_event_enabled,
     load_webhook_url,
     save_event_enabled,
@@ -421,6 +422,20 @@ class MainWindow(QMainWindow):
         )
         events_layout.addWidget(self._event_match_start_check)
 
+        self._event_race_results_check = QCheckBox("Race results (team mode only)")
+        self._event_race_results_check.setToolTip(
+            "Post a per-race embed with the winning team and per-team "
+            "scores after each race. Only fires when the match is using a "
+            "team mode and team scores can be computed from the results."
+        )
+        self._event_race_results_check.setChecked(
+            load_event_enabled(EVENT_RACE_RESULTS)
+        )
+        self._event_race_results_check.toggled.connect(
+            self._on_event_race_results_toggled
+        )
+        events_layout.addWidget(self._event_race_results_check)
+
         self._event_match_end_check = QCheckBox("Match end (results table)")
         self._event_match_end_check.setToolTip(
             "Post an embed with the winner and the generated results "
@@ -540,6 +555,16 @@ class MainWindow(QMainWindow):
         )
         logger.info(
             "Discord webhook event MATCH_START %s",
+            "enabled" if checked else "disabled",
+        )
+
+    def _on_event_race_results_toggled(self, checked: bool) -> None:
+        save_event_enabled(EVENT_RACE_RESULTS, checked)
+        self.statusBar().showMessage(
+            f"Race-results webhook {'enabled' if checked else 'disabled'}", 2000,
+        )
+        logger.info(
+            "Discord webhook event RACE_RESULTS %s",
             "enabled" if checked else "disabled",
         )
 

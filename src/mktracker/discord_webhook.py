@@ -19,6 +19,7 @@ _TRUTHY = {"1", "true", "yes", "on"}
 # add a checkbox in the Settings tab + a gated call in the state machine.
 EVENT_MATCH_START = "MATCH_START"
 EVENT_MATCH_END = "MATCH_END"
+EVENT_RACE_RESULTS = "RACE_RESULTS"
 
 
 def load_webhook_url() -> str:

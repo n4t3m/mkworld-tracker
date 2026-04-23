@@ -15,6 +15,7 @@ import numpy as np
 
 from mktracker.detection.match_results import MatchResultDetector
 from mktracker.detection.match_settings import MatchSettings, MatchSettingsDetector
+from mktracker.detection.tracks import TRACK_ICONS_DIR, TRACK_IMAGES
 from mktracker.detection.player_reader import PlayerReader
 from mktracker.detection.race_finish import RaceFinishDetector
 from mktracker.detection.race_rank import RaceRankDetector
@@ -24,10 +25,12 @@ from mktracker.debug_config import load_debug_mode
 from mktracker.discord_webhook import (
     EVENT_MATCH_END,
     EVENT_MATCH_START,
+    EVENT_RACE_RESULTS,
     load_event_enabled,
     load_webhook_url,
     send_message,
 )
+from mktracker.team_scoring import race_team_scores
 from mktracker.gemini_client import load_api_key
 from mktracker.gemini_match_results import request_match_results
 from mktracker.gemini_rank import request_race_rank
@@ -79,6 +82,90 @@ def _format_winner_line(standings: FinalStandings) -> str:
         score = f" — {top.score} pts" if top.score is not None else ""
         return f"🏅 {top.name}{score}"
     return "—"
+
+
+def _load_track_icon_bytes(track_name: str | None) -> tuple[str, bytes] | None:
+    """Return ``(filename, png_bytes)`` for *track_name*'s icon, or ``None``.
+
+    Mirrors the lookup used by the match-history UI (``TRACK_IMAGES`` +
+    ``TRACK_ICONS_DIR``) so the webhook embeds the same art.
+    """
+    if not track_name:
+        return None
+    filename = TRACK_IMAGES.get(track_name)
+    if not filename:
+        return None
+    path = TRACK_ICONS_DIR / filename
+    if not path.exists():
+        return None
+    try:
+        return filename, path.read_bytes()
+    except OSError:
+        return None
+
+
+def _build_team_placement_fields(
+    race: "RaceRecord",
+    ranked: list[tuple[str, int]],
+) -> list[dict]:
+    """Return one Discord embed field per team listing its player placements.
+
+    *ranked* is ``[(team_name, points), ...]`` sorted by points desc (the
+    same list used for the winner line). Teams are rendered in that order
+    so the winner's column appears first.
+
+    When ``race.teams`` is populated (Gemini structured results) each field
+    lists the team's players with their finishing position. When it's
+    absent (prefix-inference fallback), players are bucketed by matching
+    the team tag against the start of each placement's name.
+
+    Falls back to an empty list if neither source yields a usable mapping —
+    the embed still shows the winner and timestamp.
+    """
+    # Prefer Gemini structured data when available.
+    if race.teams and len(race.teams) >= 2:
+        by_name: dict[str, "TeamGroup"] = {
+            (t.name or ""): t for t in race.teams
+        }
+        fields: list[dict] = []
+        for name, pts in ranked:
+            team = by_name.get(name)
+            if team is None:
+                continue
+            players = sorted(team.players, key=lambda p: p.place)
+            if not players:
+                continue
+            value = "\n".join(f"`{p.place:>2}.` {p.name}" for p in players)
+            fields.append({
+                "name": f"{name} — {pts} pts",
+                "value": value,
+                "inline": True,
+            })
+        if fields:
+            return fields
+
+    # Fallback: bucket the flat placement list by tag prefix.
+    if not race.placements:
+        return []
+    from mktracker.team_scoring import assign_tag
+    tags = {name for name, _ in ranked}
+    buckets: dict[str, list["PlayerPlacement"]] = {t: [] for t in tags}
+    for p in race.placements:
+        tag = assign_tag(p.name, tags)
+        if tag is not None:
+            buckets[tag].append(p)
+    fields = []
+    for name, pts in ranked:
+        players = sorted(buckets.get(name, []), key=lambda p: p.place)
+        if not players:
+            continue
+        value = "\n".join(f"`{p.place:>2}.` {p.name}" for p in players)
+        fields.append({
+            "name": f"{name} — {pts} pts",
+            "value": value,
+            "inline": True,
+        })
+    return fields
 
 
 class GameState(Enum):
@@ -758,6 +845,7 @@ class GameStateMachine:
                 else:
                     logger.warning("Race %d: Gemini returned no placements", race_index + 1)
                 self._save_match_record()
+                self._notify_race_results(race_index)
         return _on_results
 
     # -- match record persistence -----------------------------------------
@@ -1188,6 +1276,98 @@ class GameStateMachine:
             else:
                 logger.warning(
                     "Discord webhook: match-start post failed: %s", msg,
+                )
+
+        threading.Thread(target=_post, daemon=True).start()
+
+    def _notify_race_results(self, race_index: int) -> None:
+        """Post a race-results embed to the webhook when *team mode* is
+        active and scores could be computed from the just-written results.
+
+        Fires once per race, after the Gemini results callback has stored
+        placements + team groups into the on-disk record. No-op for FFA
+        (no team mode), for OCR-only data without team structure, or when
+        the event toggle is off. Runs on a daemon thread.
+        """
+        url = load_webhook_url()
+        if not url:
+            return
+        if not load_event_enabled(EVENT_RACE_RESULTS):
+            return
+        try:
+            record = self._build_match_record()
+        except Exception:
+            logger.exception(
+                "webhook: failed to build match record for race-results embed",
+            )
+            return
+        if not (0 <= race_index < len(record.races)):
+            return
+        race = record.races[race_index]
+        settings = record.settings
+
+        scores = race_team_scores(race, settings)
+        if scores is None or len(scores) < 2:
+            return  # not team mode or couldn't score
+
+        ranked = sorted(scores, key=lambda kv: kv[1], reverse=True)
+        winner_name, winner_pts = ranked[0]
+        runner_pts = ranked[1][1]
+        delta = winner_pts - runner_pts
+        total_races = settings.race_count
+        race_number = race.race_number
+        track = race.track_name or "Unknown track"
+        match_id = self.current_match_id or ""
+
+        if delta > 0:
+            winner_line = f"🏆 {winner_name}  +{delta} ({winner_pts} pts)"
+            title = f"🏁 Race {race_number} / {total_races} — {track}"
+        else:
+            winner_line = f"🤝 Tied at {winner_pts} pts"
+            title = f"🏁 Race {race_number} / {total_races} — {track} (tie)"
+
+        team_fields = _build_team_placement_fields(race, ranked)
+
+        unix_ts = int(time.time())
+        embed: dict = {
+            "title": title,
+            "color": 0x3498DB,
+            "fields": [
+                {"name": "Winner", "value": winner_line, "inline": False},
+                *team_fields,
+                {
+                    "name": "Finished",
+                    "value": f"<t:{unix_ts}:F> (<t:{unix_ts}:R>)",
+                    "inline": False,
+                },
+            ],
+            "footer": {
+                "text": (
+                    f"MKWorld Tracker · {match_id} · race {race_number}"
+                    if match_id else f"MKWorld Tracker · race {race_number}"
+                ),
+            },
+        }
+
+        files: list[tuple[str, bytes]] | None = None
+        icon = _load_track_icon_bytes(race.track_name)
+        if icon is not None:
+            filename, data = icon
+            files = [(filename, data)]
+            embed["image"] = {"url": f"attachment://{filename}"}
+
+        def _post() -> None:
+            ok, msg = send_message(
+                url, embeds=[embed], username="MKWorld Tracker", files=files,
+            )
+            if ok:
+                logger.info(
+                    "Discord webhook: race %d results delivered (%s)",
+                    race_number, winner_name,
+                )
+            else:
+                logger.warning(
+                    "Discord webhook: race-results post failed: %s", msg,
                 )
 
         threading.Thread(target=_post, daemon=True).start()
