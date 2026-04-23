@@ -17,6 +17,7 @@ src/mktracker/
 ├── main.py                      # Entry point, logging setup (INFO level), QApplication
 ├── state_machine.py             # GameStateMachine with 8 states, debug frame saving
 ├── debug_config.py              # Debug-mode flag persistence (.env)
+├── discord_webhook.py           # Discord webhook URL + per-event toggle persistence; send_message with embed/file-attachment support
 ├── gemini_client.py             # Gemini API key/model persistence (.env) and health check
 ├── gemini_rank.py               # Async Gemini call: race placement rank from gameplay frame
 ├── gemini_results.py            # Async Gemini call: race results from multiple scrolling frames
@@ -104,7 +105,10 @@ tests/
 
 ## Match Settings UI
 - **Live View right panel** (270px wide): dropdowns for Class, Teams, Items, COM, Intermission and a spinbox for Race Count. On startup, UI defaults are pushed to the state machine (settings always available even when advancing past match detection). When match settings are detected from video, UI updates to show detected values (label: "Detected"). Reset State wipes detected settings and re-applies current UI values as manual. The `teams` setting controls which race result preprocessing path is used.
-- **Settings tab** (top-level): Gemini API key field (password-masked, with eye toggle to reveal), model name field (defaults to `gemma-3-27b-it`), Save button, and Verify Key button. Status label shows verification result in green/red/grey. A `●` dot indicator in the Live View toolbar reflects the API key status at a glance without switching tabs. Auto-verifies on startup if a key is stored. Also hosts a **Debug** group with an "Enable debug mode" checkbox — toggling it persists `DEBUG_MODE=true|false` to `.env` via `debug_config.py` and updates `GameStateMachine.debug_mode` live. The state machine reads the flag from `.env` on init; downstream code can branch on `state_machine.debug_mode` to emit additional per-race logging.
+- **Settings tab** (top-level): Gemini API key field (password-masked, with eye toggle to reveal), model name field (defaults to `gemma-3-27b-it`), Save button, and Verify Key button. Status label shows verification result in green/red/grey. A `●` dot indicator in the Live View toolbar reflects the API key status at a glance without switching tabs. Auto-verifies on startup if a key is stored. Also hosts:
+  - a **Discord Webhook** group — password-masked URL input with eye toggle, Save, and Send Test buttons. "Send Test" posts a green-accent embed via `_WebhookPingThread` to confirm the webhook is reachable; status label turns green on success, red with the HTTP/URL error on failure. URL persisted in `.env` as `DISCORD_WEBHOOK_URL`.
+  - a **Webhook Events** group — per-event checkboxes gating each webhook notification. First entry: "Match start". Each checkbox persists to `.env` as `DISCORD_NOTIFY_<EVENT>` via `save_event_enabled`; unset/empty values default to `True` so new events are opt-out.
+  - a **Debug** group with an "Enable debug mode" checkbox — toggling it persists `DEBUG_MODE=true|false` to `.env` via `debug_config.py` and updates `GameStateMachine.debug_mode` live. The state machine reads the flag from `.env` on init; downstream code can branch on `state_machine.debug_mode` to emit additional per-race logging.
 
 ## Gemini API
 - Key and model stored in `.env` (gitignored) via `python-dotenv`
@@ -119,6 +123,15 @@ tests/
 - All three modules strip markdown code fences from responses (Gemini sometimes wraps JSON in `` ```json ... ``` `` despite instructions) and retry parsing after stripping.
 - Each call writes a text log (`gemini_rank.txt`, `gemini_results.txt`, `gemini_match_results.txt`) to the race's debug folder with prompt, model, raw response, and parsed result (or error details).
 - When no API key is configured, all three fall back to OCR-based detection with no Gemini calls.
+
+## Discord Webhooks
+- **`src/mktracker/discord_webhook.py`** — thin module handling everything webhook-related:
+  - URL persistence: `load_webhook_url()` / `save_webhook_url()` read/write `DISCORD_WEBHOOK_URL` in `.env`.
+  - Per-event toggles: `load_event_enabled(event)` / `save_event_enabled(event, bool)` read/write `DISCORD_NOTIFY_<EVENT>`. Unset → `True` (new events are opt-out by default). Event keys are registered as module-level constants; `EVENT_MATCH_START` is the first.
+  - `send_message(url, content="", *, embeds=None, username=None, files=None)` posts to the webhook. When `files=[(name, bytes), ...]` is supplied the request switches from JSON to `multipart/form-data` via `_encode_multipart` (payload rides in `payload_json`, each file as `files[i]`); embeds can then reference uploads via `attachment://<name>`.
+  - **User-Agent is required**: Discord's Cloudflare edge rejects the default `Python-urllib/*` UA with 403. All requests send `MKWorldTracker (…)`.
+- **Match-start notification**: `GameStateMachine._notify_match_started(*, manual, frame=None)` posts a green embed titled "🏁 Match Started" (or "🏁 Manual Match Started" for `start_manual_match()`) with fields for every match setting and a `<t:UNIX:F> (<t:UNIX:R>)` Started timestamp — Discord renders both the full and relative timestamps in the viewer's local timezone. When *frame* is provided, `cv2.imencode(".png", …)` attaches `match_settings.png` and the embed's `image.url` is set to `attachment://match_settings.png`. Short-circuits if no URL is configured OR `load_event_enabled(EVENT_MATCH_START)` is False. Runs on a daemon thread so network failures never stall the state machine.
+- **Adding a new event**: register an `EVENT_*` constant in `discord_webhook.py`, gate the post on `load_event_enabled(...)`, add a checkbox in `_build_api_settings_panel` wired to `save_event_enabled(...)`, and document the new `DISCORD_NOTIFY_*` key in `.env.example`.
 
 ## Debug Frame Saving
 - Each match creates a timestamped folder under `matches/` (gitignored)
