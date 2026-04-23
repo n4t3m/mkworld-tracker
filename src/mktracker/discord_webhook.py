@@ -18,6 +18,7 @@ _TRUTHY = {"1", "true", "yes", "on"}
 # Event keys used across the app. Adding a new event = register it here and
 # add a checkbox in the Settings tab + a gated call in the state machine.
 EVENT_MATCH_START = "MATCH_START"
+EVENT_MATCH_END = "MATCH_END"
 
 
 def load_webhook_url() -> str:

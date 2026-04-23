@@ -22,6 +22,7 @@ from mktracker.detection.race_results import RaceResultDetector
 from mktracker.detection.track_select import TrackSelectDetector
 from mktracker.debug_config import load_debug_mode
 from mktracker.discord_webhook import (
+    EVENT_MATCH_END,
     EVENT_MATCH_START,
     load_event_enabled,
     load_webhook_url,
@@ -56,6 +57,28 @@ _DEBUG_RANK_DIR = Path("debug_rank")
 # Number of frames before/after the placement burst to save when debug mode
 # is enabled. Saved into <race_dir>/debug_placements/.
 _DEBUG_PLACEMENT_CONTEXT = 5
+
+
+def _format_winner_line(standings: FinalStandings) -> str:
+    """Summarise the winner of a finished match for a Discord embed.
+
+    Prefers a team's ``winner=True`` flag, falling back to highest points
+    in team matches. For FFA, returns the player with ``place=1``.
+    """
+    teams = standings.teams or []
+    if teams:
+        winners = [t for t in teams if t.winner]
+        team = winners[0] if winners else max(
+            teams, key=lambda t: t.points if t.points is not None else -1,
+        )
+        label = team.tag or team.name or "?"
+        pts = f" — {team.points} pts" if team.points is not None else ""
+        return f"🏅 {label}{pts}"
+    if standings.players:
+        top = min(standings.players, key=lambda p: p.place)
+        score = f" — {top.score} pts" if top.score is not None else ""
+        return f"🏅 {top.name}{score}"
+    return "—"
 
 
 class GameState(Enum):
@@ -585,6 +608,7 @@ class GameStateMachine:
             logger.info("  %s: %d pts", name, points)
         self._dump_match_summary()
         self._save_match_record()
+        self._notify_match_ended()
         self._transition(GameState.WAITING_FOR_MATCH)
 
     def _make_match_results_callback(
@@ -612,6 +636,7 @@ class GameStateMachine:
                     logger.warning("Gemini returned no match results")
                 self._dump_match_summary()
                 self._save_match_record()
+                self._notify_match_ended()
         return _on_results
 
     def _dump_match_summary(self) -> None:
@@ -1163,6 +1188,83 @@ class GameStateMachine:
             else:
                 logger.warning(
                     "Discord webhook: match-start post failed: %s", msg,
+                )
+
+        threading.Thread(target=_post, daemon=True).start()
+
+    def _notify_match_ended(self) -> None:
+        """Post a match-complete embed (with rendered results table) to the
+        configured Discord webhook.
+
+        Snapshots the current match into a :class:`MatchRecord` on the
+        state-machine thread, then hands table rendering + the HTTP POST
+        off to a daemon thread. No-op if no URL is configured, the event
+        is disabled, or final standings aren't set yet. Post failures are
+        logged, never surfaced to the UI.
+        """
+        url = load_webhook_url()
+        if not url:
+            return
+        if not load_event_enabled(EVENT_MATCH_END):
+            return
+        try:
+            record = self._build_match_record()
+        except Exception:
+            logger.exception("webhook: failed to build match record for match-end embed")
+            return
+        if record.final_standings is None:
+            return
+
+        match_id = self.current_match_id or ""
+        completed_races = len(self._races)
+        total_races = (
+            self._match_settings.race_count if self._match_settings else completed_races
+        )
+        winner_line = _format_winner_line(record.final_standings)
+
+        def _post() -> None:
+            try:
+                png = generate_table(record)
+            except Exception:
+                logger.exception(
+                    "webhook: failed to render table for match-end embed",
+                )
+                png = None
+
+            unix_ts = int(time.time())
+            embed: dict = {
+                "title": "🏆 Match Complete",
+                "color": 0xF1C40F,
+                "fields": [
+                    {"name": "Winner", "value": winner_line, "inline": False},
+                    {
+                        "name": "Races",
+                        "value": f"{completed_races} / {total_races}",
+                        "inline": True,
+                    },
+                    {
+                        "name": "Completed",
+                        "value": f"<t:{unix_ts}:F> (<t:{unix_ts}:R>)",
+                        "inline": False,
+                    },
+                ],
+                "footer": {
+                    "text": f"MKWorld Tracker · {match_id}" if match_id else "MKWorld Tracker",
+                },
+            }
+            files: list[tuple[str, bytes]] | None = None
+            if png:
+                files = [("table.png", png)]
+                embed["image"] = {"url": "attachment://table.png"}
+
+            ok, msg = send_message(
+                url, embeds=[embed], username="MKWorld Tracker", files=files,
+            )
+            if ok:
+                logger.info("Discord webhook: match-end message delivered")
+            else:
+                logger.warning(
+                    "Discord webhook: match-end post failed: %s", msg,
                 )
 
         threading.Thread(target=_post, daemon=True).start()

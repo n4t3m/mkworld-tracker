@@ -31,6 +31,7 @@ from mktracker.capture.video_source import VideoCapture, enumerate_sources
 from mktracker.debug_config import load_debug_mode, save_debug_mode
 from mktracker.detection.match_settings import MatchSettings
 from mktracker.discord_webhook import (
+    EVENT_MATCH_END,
     EVENT_MATCH_START,
     load_event_enabled,
     load_webhook_url,
@@ -420,6 +421,19 @@ class MainWindow(QMainWindow):
         )
         events_layout.addWidget(self._event_match_start_check)
 
+        self._event_match_end_check = QCheckBox("Match end (results table)")
+        self._event_match_end_check.setToolTip(
+            "Post an embed with the winner and the generated results "
+            "table image when a match completes."
+        )
+        self._event_match_end_check.setChecked(
+            load_event_enabled(EVENT_MATCH_END)
+        )
+        self._event_match_end_check.toggled.connect(
+            self._on_event_match_end_toggled
+        )
+        events_layout.addWidget(self._event_match_end_check)
+
         layout.addWidget(events_group)
 
         # --- Debug group -----------------------------------------------------
@@ -526,6 +540,16 @@ class MainWindow(QMainWindow):
         )
         logger.info(
             "Discord webhook event MATCH_START %s",
+            "enabled" if checked else "disabled",
+        )
+
+    def _on_event_match_end_toggled(self, checked: bool) -> None:
+        save_event_enabled(EVENT_MATCH_END, checked)
+        self.statusBar().showMessage(
+            f"Match-end webhook {'enabled' if checked else 'disabled'}", 2000,
+        )
+        logger.info(
+            "Discord webhook event MATCH_END %s",
             "enabled" if checked else "disabled",
         )
 
