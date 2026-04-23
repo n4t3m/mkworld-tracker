@@ -21,6 +21,12 @@ from mktracker.detection.race_rank import RaceRankDetector
 from mktracker.detection.race_results import RaceResultDetector
 from mktracker.detection.track_select import TrackSelectDetector
 from mktracker.debug_config import load_debug_mode
+from mktracker.discord_webhook import (
+    EVENT_MATCH_START,
+    load_event_enabled,
+    load_webhook_url,
+    send_message,
+)
 from mktracker.gemini_client import load_api_key
 from mktracker.gemini_match_results import request_match_results
 from mktracker.gemini_rank import request_race_rank
@@ -249,6 +255,7 @@ class GameStateMachine:
             s.race_count, s.intermission,
         )
         self._save_match_record()
+        self._notify_match_started(manual=True)
         return True
 
     _ADVANCE_ORDER = {
@@ -315,6 +322,7 @@ class GameStateMachine:
             settings.intermission,
         )
         self._save_match_record()
+        self._notify_match_started(manual=False, frame=frame)
         self._transition(GameState.MATCH_STARTED)
 
     def _handle_match_started(self) -> None:
@@ -1088,6 +1096,76 @@ class GameStateMachine:
         path = self._match_dir / f"{safe}.png"
         cv2.imwrite(str(path), frame)
         logger.debug("Saved debug frame: %s", path)
+
+    # -- discord webhook notifications ------------------------------------
+
+    def _notify_match_started(
+        self, *, manual: bool, frame: np.ndarray | None = None,
+    ) -> None:
+        """Post a match-start embed to the configured Discord webhook.
+
+        If *frame* is given, the settings screenshot is attached to the
+        message and displayed inside the embed. No-op if no webhook URL
+        is configured. Runs on a daemon thread so network failures never
+        stall the state machine. Post failures are logged but not surfaced
+        to the UI.
+        """
+        url = load_webhook_url()
+        if not url or self._match_settings is None:
+            return
+        if not load_event_enabled(EVENT_MATCH_START):
+            return
+
+        s = self._match_settings
+        unix_ts = int(time.time())
+        title = "🏁 Manual Match Started" if manual else "🏁 Match Started"
+        match_id = self.current_match_id or ""
+
+        embed: dict = {
+            "title": title,
+            "color": 0x2ECC71,
+            "fields": [
+                {"name": "Class", "value": s.cc_class, "inline": True},
+                {"name": "Teams", "value": s.teams, "inline": True},
+                {"name": "Items", "value": s.items, "inline": True},
+                {"name": "COM", "value": s.com_difficulty, "inline": True},
+                {"name": "Races", "value": str(s.race_count), "inline": True},
+                {"name": "Intermission", "value": s.intermission, "inline": True},
+                {
+                    "name": "Started",
+                    "value": f"<t:{unix_ts}:F> (<t:{unix_ts}:R>)",
+                    "inline": False,
+                },
+            ],
+            "footer": {
+                "text": f"MKWorld Tracker · {match_id}" if match_id else "MKWorld Tracker",
+            },
+        }
+
+        files: list[tuple[str, bytes]] | None = None
+        if frame is not None:
+            ok, buf = cv2.imencode(".png", frame)
+            if ok:
+                filename = "match_settings.png"
+                files = [(filename, buf.tobytes())]
+                embed["image"] = {"url": f"attachment://{filename}"}
+            else:
+                logger.warning(
+                    "Discord webhook: failed to PNG-encode match_settings frame",
+                )
+
+        def _post() -> None:
+            ok, msg = send_message(
+                url, embeds=[embed], username="MKWorld Tracker", files=files,
+            )
+            if ok:
+                logger.info("Discord webhook: match-start message delivered")
+            else:
+                logger.warning(
+                    "Discord webhook: match-start post failed: %s", msg,
+                )
+
+        threading.Thread(target=_post, daemon=True).start()
 
     # -- transitions -------------------------------------------------------
 

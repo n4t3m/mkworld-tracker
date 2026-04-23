@@ -30,7 +30,14 @@ from PySide6.QtWidgets import (
 from mktracker.capture.video_source import VideoCapture, enumerate_sources
 from mktracker.debug_config import load_debug_mode, save_debug_mode
 from mktracker.detection.match_settings import MatchSettings
-from mktracker.discord_webhook import load_webhook_url, save_webhook_url, send_message
+from mktracker.discord_webhook import (
+    EVENT_MATCH_START,
+    load_event_enabled,
+    load_webhook_url,
+    save_event_enabled,
+    save_webhook_url,
+    send_message,
+)
 from mktracker.gemini_client import (
     SUGGESTED_MODELS,
     load_api_key,
@@ -387,6 +394,34 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(webhook_group)
 
+        # --- Webhook events group -------------------------------------------
+        events_group = QGroupBox("Webhook Events")
+        events_layout = QVBoxLayout(events_group)
+        events_layout.setSpacing(6)
+
+        events_hint = QLabel(
+            "Choose which events post to the webhook. "
+            "Defaults to enabled for new events."
+        )
+        events_hint.setStyleSheet("QLabel { color: #888; font-style: italic; }")
+        events_hint.setWordWrap(True)
+        events_layout.addWidget(events_hint)
+
+        self._event_match_start_check = QCheckBox("Match start")
+        self._event_match_start_check.setToolTip(
+            "Post an embed with the match rules (and settings screenshot) "
+            "when a new match begins."
+        )
+        self._event_match_start_check.setChecked(
+            load_event_enabled(EVENT_MATCH_START)
+        )
+        self._event_match_start_check.toggled.connect(
+            self._on_event_match_start_toggled
+        )
+        events_layout.addWidget(self._event_match_start_check)
+
+        layout.addWidget(events_group)
+
         # --- Debug group -----------------------------------------------------
         debug_group = QGroupBox("Debug")
         debug_layout = QVBoxLayout(debug_group)
@@ -483,6 +518,16 @@ class MainWindow(QMainWindow):
     def _on_toggle_webhook_visibility(self, checked: bool) -> None:
         mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
         self._webhook_edit.setEchoMode(mode)
+
+    def _on_event_match_start_toggled(self, checked: bool) -> None:
+        save_event_enabled(EVENT_MATCH_START, checked)
+        self.statusBar().showMessage(
+            f"Match-start webhook {'enabled' if checked else 'disabled'}", 2000,
+        )
+        logger.info(
+            "Discord webhook event MATCH_START %s",
+            "enabled" if checked else "disabled",
+        )
 
     def _on_ping_webhook(self) -> None:
         url = self._webhook_edit.text().strip()
