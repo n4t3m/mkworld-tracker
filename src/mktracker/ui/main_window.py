@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from mktracker.capture.video_source import VideoCapture, enumerate_sources
 from mktracker.debug_config import load_debug_mode, save_debug_mode
 from mktracker.detection.match_settings import MatchSettings
+from mktracker.discord_webhook import load_webhook_url, save_webhook_url
 from mktracker.gemini_client import (
     SUGGESTED_MODELS,
     load_api_key,
@@ -304,6 +305,43 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(model_group)
 
+        # --- Discord webhook group ------------------------------------------
+        webhook_group = QGroupBox("Discord Webhook")
+        webhook_layout = QVBoxLayout(webhook_group)
+        webhook_layout.setSpacing(6)
+
+        webhook_row = QHBoxLayout()
+        self._webhook_edit = QLineEdit()
+        self._webhook_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._webhook_edit.setPlaceholderText("https://discord.com/api/webhooks/…")
+        webhook_row.addWidget(self._webhook_edit, 1)
+
+        self._webhook_eye_btn = QPushButton("👁")
+        self._webhook_eye_btn.setFixedWidth(30)
+        self._webhook_eye_btn.setCheckable(True)
+        self._webhook_eye_btn.setToolTip("Show/hide webhook URL")
+        self._webhook_eye_btn.toggled.connect(self._on_toggle_webhook_visibility)
+        webhook_row.addWidget(self._webhook_eye_btn)
+
+        webhook_save_btn = QPushButton("Save")
+        webhook_save_btn.clicked.connect(self._on_save_webhook_url)
+        webhook_row.addWidget(webhook_save_btn)
+
+        webhook_layout.addLayout(webhook_row)
+
+        self._webhook_status_label = QLabel()
+        self._webhook_status_label.setWordWrap(True)
+        webhook_layout.addWidget(self._webhook_status_label)
+
+        stored_webhook = load_webhook_url()
+        if stored_webhook:
+            self._webhook_edit.setText(stored_webhook)
+            self._set_webhook_status(True, "Webhook URL loaded from .env.")
+        else:
+            self._set_webhook_status(None, "No webhook URL set.")
+
+        layout.addWidget(webhook_group)
+
         # --- Debug group -----------------------------------------------------
         debug_group = QGroupBox("Debug")
         debug_layout = QVBoxLayout(debug_group)
@@ -371,6 +409,35 @@ class MainWindow(QMainWindow):
     def _on_toggle_key_visibility(self, checked: bool) -> None:
         mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
         self._api_key_edit.setEchoMode(mode)
+
+    def _set_webhook_status(self, ok: bool | None, message: str) -> None:
+        """Update the webhook status label. ok=True=green, ok=False=red, ok=None=grey."""
+        if ok is True:
+            color = "#4a4"
+        elif ok is False:
+            color = "#c44"
+        else:
+            color = "#888"
+        self._webhook_status_label.setStyleSheet(
+            f"QLabel {{ color: {color}; font-style: italic; }}"
+        )
+        self._webhook_status_label.setText(message)
+
+    def _on_save_webhook_url(self) -> None:
+        url = self._webhook_edit.text().strip()
+        if not url:
+            save_webhook_url("")
+            self._set_webhook_status(None, "Webhook URL cleared.")
+            logger.info("Discord webhook URL cleared.")
+            return
+        save_webhook_url(url)
+        self._set_webhook_status(True, "Webhook URL saved.")
+        self.statusBar().showMessage("Discord webhook URL saved", 2000)
+        logger.info("Discord webhook URL saved.")
+
+    def _on_toggle_webhook_visibility(self, checked: bool) -> None:
+        mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+        self._webhook_edit.setEchoMode(mode)
 
     def _on_verify_api_key(self) -> None:
         key = self._api_key_edit.text().strip()
