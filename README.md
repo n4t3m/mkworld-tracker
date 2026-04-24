@@ -44,6 +44,26 @@ If any names or scores were misread, the table can be edited directly from the M
 
 https://github.com/user-attachments/assets/44d16668-a95c-4bb5-8190-1f4e8add526e
 
+**Discord webhook notifications**
+
+Live match updates can be sent to a Discord channel automatically via a Discord webhook. Once a webhook URL is configured, the app posts an embed at each key moment of a match — no manual interaction required.
+
+Match start — posts the detected match settings along with a snapshot of the rules screen:
+
+![Match start webhook embed](assets/images/webhook_matchstart.png)
+
+Race results — When the match is played in team mode, posts per-team placements, the race winner, and the point delta after every race:
+
+![Race result webhook embed](assets/images/webhook_raceresult.png)
+
+Match end — posts the final standings with the generated results table attached as an image:
+
+![Match end webhook embed](assets/images/webhook_table.png)
+
+Each notification is individually configurable from the **Settings** tab. Paste your webhook URL, hit **Send Test** to confirm it's reachable, then toggle the checkboxes under **Webhook Events** to pick which moments get posted (match start, per-race results, match end).
+
+![Discord webhook settings](assets/images/webhook_settings.png)
+
 ## Features
 
 - **Live game state detection**: This program will automatically detect when a match starts and track all information about the race, track selection, placements, etc. No manual interaction from you is needed.
