@@ -28,6 +28,18 @@ Per-race team scores and race winner are calculated automatically from the detec
 
 https://github.com/user-attachments/assets/d7ac429f-694b-42a3-90be-5c84c20f4a71
 
+**Results table**
+
+When a match ends, a result table is generated automatically from the final standings. The table is viewable in the Match History tab and can be copied to the clipboard or edited in place.
+
+![Generated results table example](assets/images/resultstable.png)
+
+**Editing the results table**
+
+If any names or scores were misread, the table can be edited directly from the Match History tab via the **Edit Table** button. The dialog a similar format to Lorenzi's table editor (team tag followed by `<name> <score>` rows, blank lines between teams); saving re-derives placements, regenerates the PNG, and updates the stored match record.
+
+![Editing the results table](assets/images/edittable.png)
+
 **Menu navigation**
 
 https://github.com/user-attachments/assets/44d16668-a95c-4bb5-8190-1f4e8add526e
