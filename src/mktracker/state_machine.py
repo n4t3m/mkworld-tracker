@@ -298,20 +298,19 @@ class GameStateMachine:
     def races(self) -> list[RaceInfo]:
         return list(self._races)
 
-    def reset(self) -> None:
-        """Reset to WAITING_FOR_MATCH, clearing all match data."""
-        self._match_settings = None
+    def _clear_match_data(self) -> None:
+        """Reset all per-match transient state.
+
+        Why: shared by :meth:`reset` and the auto-detect path in
+        :meth:`_handle_waiting` so a new match never inherits stale fields
+        (race placements, final standings, Gemini callbacks-in-flight markers)
+        from the prior one.  Previously these two paths drifted, causing the
+        previous match's ``final_standings`` to be written into the new
+        match's ``match.json`` and rendered into its ``table.png``.
+        """
         self._races = []
         self._current_race = 0
-        self._match_started_at = None
         self._match_completed_at = None
-        # Drop the match folder pointer so the next real or manual match
-        # gets a fresh timestamped directory rather than reusing the old one.
-        self._match_dir = None
-        # Invalidate any in-flight Gemini callbacks for the prior match —
-        # they will route their result to the on-disk match record instead
-        # of writing into the (now-cleared) live state.
-        self._match_seq += 1
         self._pending_track = None
         self._race_placements = {}
         self._race_placement_quality = {}
@@ -323,6 +322,19 @@ class GameStateMachine:
         self._match_final_results = None
         self._gemini_match_results = None
         self._match_banner_seen_at = None
+
+    def reset(self) -> None:
+        """Reset to WAITING_FOR_MATCH, clearing all match data."""
+        self._clear_match_data()
+        self._match_settings = None
+        self._match_started_at = None
+        # Drop the match folder pointer so the next real or manual match
+        # gets a fresh timestamped directory rather than reusing the old one.
+        self._match_dir = None
+        # Invalidate any in-flight Gemini callbacks for the prior match —
+        # they will route their result to the on-disk match record instead
+        # of writing into the (now-cleared) live state.
+        self._match_seq += 1
         self._track_detector._last_match_time = 0.0
         self._transition(GameState.WAITING_FOR_MATCH)
 
@@ -412,9 +424,8 @@ class GameStateMachine:
         settings = self._match_detector.detect(frame)
         if settings is None:
             return
+        self._clear_match_data()
         self._match_settings = settings
-        self._races = []
-        self._match_completed_at = None
         # Invalidate any in-flight Gemini callbacks for the prior match.
         self._match_seq += 1
         now = datetime.now()
