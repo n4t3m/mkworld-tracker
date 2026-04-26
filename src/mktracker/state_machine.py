@@ -61,6 +61,15 @@ _DEBUG_RANK_DIR = Path("debug_rank")
 # is enabled. Saved into <race_dir>/debug_placements/.
 _DEBUG_PLACEMENT_CONTEXT = 5
 
+# Roughly how far before track-name detection the voting roulette is on
+# screen.  When debug mode is on we save the buffered frame closest to
+# this offset as <race_dir>/debug_votes.png.
+_DEBUG_VOTES_OFFSET_S = 1.5
+# Cap on the rolling pre-track buffer (frames + monotonic timestamps).
+# Detection in WAITING_FOR_TRACK_PICK runs every ~500 ms, so 12 entries
+# covers ~6 s of history — plenty of slack around the 1.5 s target.
+_DEBUG_VOTES_BUFFER_MAX = 12
+
 
 def _format_winner_line(standings: FinalStandings) -> str:
     """Summarise the winner of a finished match for a Discord embed.
@@ -237,6 +246,13 @@ class GameStateMachine:
         self._gemini_match_results: dict | None = None
         self._match_banner_seen_at: float | None = None
 
+        # Debug-mode rolling buffer of (timestamp, frame) tuples seen
+        # during WAITING_FOR_TRACK_PICK.  Used to recover the voting
+        # roulette frame ~1.5s before track detection fires.
+        self._pre_track_buffer: collections.deque[tuple[float, np.ndarray]] = (
+            collections.deque(maxlen=_DEBUG_VOTES_BUFFER_MAX)
+        )
+
         self.debug_mode: bool = load_debug_mode()
 
         logger.info(
@@ -322,6 +338,7 @@ class GameStateMachine:
         self._match_final_results = None
         self._gemini_match_results = None
         self._match_banner_seen_at = None
+        self._pre_track_buffer.clear()
 
     def reset(self) -> None:
         """Reset to WAITING_FOR_MATCH, clearing all match data."""
@@ -452,11 +469,15 @@ class GameStateMachine:
             self._transition(GameState.WAITING_FOR_TRACK_PICK)
 
     def _handle_racing(self, frame: np.ndarray) -> None:
+        if self.debug_mode:
+            self._pre_track_buffer.append((time.monotonic(), frame.copy()))
         result = self._track_detector.detect(frame)
         if result is None:
             return
         self._pending_track = result["track_name"]
         self._save_race_frame(frame, len(self._races) + 1, "track")
+        if self.debug_mode:
+            self._save_votes_frame(len(self._races) + 1)
         logger.info("Track detected: %s — reading players on next frame", self._pending_track)
         self._transition(GameState.READING_PLAYERS_IN_RACE)
 
@@ -1212,6 +1233,31 @@ class GameStateMachine:
         cv2.imwrite(str(path), frame)
         logger.debug("Saved debug frame: %s", path)
 
+    def _save_votes_frame(self, race_num: int) -> None:
+        """Save the buffered frame closest to ``_DEBUG_VOTES_OFFSET_S``
+        before now as ``debug_votes.png`` in the race folder.
+
+        The voting roulette appears briefly before the track-name banner;
+        rather than detect it we just rewind through the rolling buffer
+        of frames sampled during ``WAITING_FOR_TRACK_PICK``.  No-op if
+        the buffer is empty (e.g. debug mode was toggled on partway
+        through the state).
+        """
+        if not self._pre_track_buffer:
+            return
+        target_ts = time.monotonic() - _DEBUG_VOTES_OFFSET_S
+        ts, vote_frame = min(
+            self._pre_track_buffer,
+            key=lambda entry: abs(entry[0] - target_ts),
+        )
+        race_dir = self._race_dir(race_num)
+        path = race_dir / "debug_votes.png"
+        cv2.imwrite(str(path), vote_frame)
+        logger.debug(
+            "Debug: saved votes frame %.2fs before track detection: %s",
+            time.monotonic() - ts, path,
+        )
+
     def _save_frame(self, frame: np.ndarray, label: str) -> None:
         if self._match_dir is None:
             self._match_dir = _MATCHES_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1466,6 +1512,7 @@ class GameStateMachine:
         logger.info("State: %s -> %s", self._state.name, new_state.name)
         if new_state is GameState.WAITING_FOR_TRACK_PICK:
             self._current_race += 1
+            self._pre_track_buffer.clear()
         elif new_state is GameState.WAITING_FOR_MATCH:
             self._current_race = 0
         self._state = new_state
