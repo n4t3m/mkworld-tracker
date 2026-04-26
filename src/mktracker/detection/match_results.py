@@ -134,6 +134,19 @@ _TT_BANNER_GRAY_VAL_HI = 100
 _TT_BANNER_ROW_COVERAGE_MIN = 0.85   # per-row fraction to count as "solid"
 _TT_BANNER_RUN_FRAC_MIN = 0.08       # consecutive solid rows (fraction of strip)
 
+# Extra banner-stripe colours used for 3/4-team modes.  The 3-team banner can
+# be yellow (yellow team won) and the 4-team banner can be green (green team
+# won), in addition to the red/blue/grey banners possible in 2-team mode.
+# Yellow uses a slightly looser V threshold than the no-teams banner check
+# because the 3-team yellow banner has heavy graffiti/texture overlay that
+# pulls the brightness down on solid-coloured rows.
+_TT_BANNER_YELLOW_H_LO = 15
+_TT_BANNER_YELLOW_H_HI = 35
+_TT_BANNER_YELLOW_VAL_MIN = 120
+_TT_BANNER_GREEN_H_LO = 40
+_TT_BANNER_GREEN_H_HI = 85
+_TT_BANNER_GREEN_SAT_MIN = 100
+
 
 class MatchResultDetector:
     """Detect and read final match results from the CONGRATULATIONS! screen."""
@@ -315,14 +328,16 @@ class MatchResultDetector:
         present.
 
         In ``No Teams`` mode the banner has yellow text on a red/orange
-        diagonal stripe.  In ``Two Teams`` mode the banner background
-        instead takes the *winning* team's colour (red or blue), or is
-        dark grey on a draw, with white text — so the no-teams signature
-        does not match.  For team mode we delegate to the team-specific
-        check that looks at the red/blue team-score panels below the banner.
+        diagonal stripe.  In team modes the banner background instead
+        takes the *winning* team's colour (red/blue/yellow/green
+        depending on the team count), or is dark grey on a draw, with
+        white text — so the no-teams signature does not match.  Team
+        modes are delegated to the team-specific banner check.
         """
         if teams == "Two Teams":
             return MatchResultDetector._has_two_team_result_banner(frame)
+        if teams in ("Three Teams", "Four Teams"):
+            return MatchResultDetector._has_multi_team_result_banner(frame)
         h, w = frame.shape[:2]
         banner = frame[:int(h * _NT_BANNER_Y2), :int(w * _NT_BANNER_X2)]
         hsv = cv2.cvtColor(banner, cv2.COLOR_BGR2HSV)
@@ -380,30 +395,97 @@ class MatchResultDetector:
         ):
             return False
 
+        return (
+            MatchResultDetector._best_banner_stripe_run(
+                frame, include_yellow=False, include_green=False,
+            )
+            >= _TT_BANNER_RUN_FRAC_MIN
+        )
+
+    @staticmethod
+    def _has_multi_team_result_banner(frame: np.ndarray) -> bool:
+        """Return True if a 3-team or 4-team CONGRATULATIONS!/NICE TRY!/
+        DRAW! banner is showing.
+
+        The 2-team panel-spatial check (red on the left half + blue on
+        the right half below the banner) does not generalise: 3-team
+        layouts split the area into red/blue/yellow panels and 4-team
+        layouts add a green panel, and during the brief load-in window
+        the panels haven't appeared yet even though the banner is
+        already up.  Instead we rely on the same banner-stripe check
+        that the 2-team detector uses for its second-pass discriminator,
+        extended to cover yellow (3/4-team yellow team) and green
+        (4-team green team) winner banners.
+
+        The stripe-run check alone is a strong discriminator: gameplay,
+        mid-race standings, player lists, and FINISH frames produce
+        zero solid coloured rows in the top strip, while real banners
+        produce a continuous solid run covering at least 8% of the strip.
+        """
+        return (
+            MatchResultDetector._best_banner_stripe_run(frame)
+            >= _TT_BANNER_RUN_FRAC_MIN
+        )
+
+    @staticmethod
+    def _best_banner_stripe_run(
+        frame: np.ndarray,
+        *,
+        include_yellow: bool = True,
+        include_green: bool = True,
+    ) -> float:
+        """Longest solid-row run in the top banner strip across the set
+        of valid banner colours.
+
+        Always considers red, blue, and dark grey.  ``include_yellow``
+        and ``include_green`` add the 3/4-team winner banner colours;
+        the 2-team detector keeps them off so a 3-team yellow banner
+        cannot be mis-routed to the 2-team OCR path.
+
+        Returned as a fraction of strip height; a row counts as solid
+        if at least ``_TT_BANNER_ROW_COVERAGE_MIN`` of its pixels match
+        a single colour mask.
+        """
+        h, w = frame.shape[:2]
         top = frame[:int(h * _TT_BANNER_Y2), :]
         hsv_t = cv2.cvtColor(top, cv2.COLOR_BGR2HSV)
         gray_t = cv2.cvtColor(top, cv2.COLOR_BGR2GRAY)
+        H, S, V = hsv_t[:, :, 0], hsv_t[:, :, 1], hsv_t[:, :, 2]
         top_red = (
-            ((hsv_t[:, :, 0] < 15) | (hsv_t[:, :, 0] > 160))
-            & (hsv_t[:, :, 1] > _TT_BANNER_SAT_MIN)
-            & (hsv_t[:, :, 2] > _TT_BANNER_VAL_MIN)
+            ((H < 15) | (H > 160))
+            & (S > _TT_BANNER_SAT_MIN)
+            & (V > _TT_BANNER_VAL_MIN)
         )
         top_blue = (
-            (hsv_t[:, :, 0] >= 90) & (hsv_t[:, :, 0] <= 130)
-            & (hsv_t[:, :, 1] > _TT_BANNER_SAT_MIN)
-            & (hsv_t[:, :, 2] > _TT_BANNER_VAL_MIN)
+            (H >= 90) & (H <= 130)
+            & (S > _TT_BANNER_SAT_MIN)
+            & (V > _TT_BANNER_VAL_MIN)
         )
         top_gray = (
-            (hsv_t[:, :, 1] < _TT_BANNER_GRAY_SAT_MAX)
+            (S < _TT_BANNER_GRAY_SAT_MAX)
             & (gray_t > _TT_BANNER_GRAY_VAL_LO)
             & (gray_t < _TT_BANNER_GRAY_VAL_HI)
         )
-        best_run = max(
+        runs = [
             MatchResultDetector._longest_solid_run(top_red),
             MatchResultDetector._longest_solid_run(top_blue),
             MatchResultDetector._longest_solid_run(top_gray),
-        )
-        return best_run >= _TT_BANNER_RUN_FRAC_MIN
+        ]
+        if include_yellow:
+            top_yellow = (
+                (H >= _TT_BANNER_YELLOW_H_LO) & (H <= _TT_BANNER_YELLOW_H_HI)
+                & (S > _TT_BANNER_SAT_MIN)
+                & (V > _TT_BANNER_YELLOW_VAL_MIN)
+            )
+            runs.append(MatchResultDetector._longest_solid_run(top_yellow))
+        if include_green:
+            top_green = (
+                (H >= _TT_BANNER_GREEN_H_LO) & (H <= _TT_BANNER_GREEN_H_HI)
+                & (S > _TT_BANNER_GREEN_SAT_MIN)
+                & (V > _TT_BANNER_VAL_MIN)
+            )
+            runs.append(MatchResultDetector._longest_solid_run(top_green))
+        return max(runs)
 
     @staticmethod
     def _longest_solid_run(mask: np.ndarray) -> float:

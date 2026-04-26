@@ -177,3 +177,74 @@ def test_rejects_two_teams_midrace_standings():
     assert result is None
 
 
+# ---------------------------------------------------------------------------
+# 3/4-team banner readiness — winning team's colour drives the banner, so the
+# 2-team red-left/blue-right panel signature does not generalise.  These tests
+# cover yellow (3-team) and green (4-team) banners, which only appear when the
+# yellow/green team wins.  The Gemini path uses ``_has_result_banner`` directly
+# for readiness in these modes (full OCR ``detect()`` is not implemented for
+# 3/4-team layouts).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "filename,teams",
+    [
+        ("threeteams_banner_yellow_win.png", "Three Teams"),
+        ("fourteams_banner_green_win.png", "Four Teams"),
+        # Banner appeared but team-score panels haven't loaded yet — the
+        # state machine waits 1s after this fires before sending to Gemini,
+        # so accepting the loading frame is correct.
+        ("fourteams_banner_green_win_loading.png", "Four Teams"),
+    ],
+)
+def test_multi_team_banner_detected(filename, teams):
+    frame = _load(filename)
+    assert _detector._has_result_banner(frame, teams=teams), (
+        f"Expected {teams} banner to be detected on {filename}"
+    )
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "20260329_131323.png",   # Pure gameplay — golden temple
+        "20260329_144018.png",   # Pure gameplay — yellow "1st" badge
+        "bad_gameplay_naples.png",  # Naples brick wall — heavy red coverage
+        "20260329_162559.png",   # No-teams 24-player result screen
+        "bad_twoteams_midrace_standings.png",  # Mid-race standings
+        "bad_player_list_06.png",
+        "bad_player_list_07.png",
+        "bad_player_list_12.png",
+        "bad_finish_banner_blue_sky.png",
+        "nicetryvariant.png",    # No-teams NICE TRY (different banner background)
+    ],
+)
+@pytest.mark.parametrize("teams", ["Three Teams", "Four Teams"])
+def test_multi_team_banner_rejects_non_team_screens(filename, teams):
+    frame = _load(filename)
+    assert not _detector._has_result_banner(frame, teams=teams), (
+        f"{teams} banner check should reject {filename}"
+    )
+
+
+# Existing 2-team banner cases must still register under the 2-team path,
+# and the 3/4-team detector must also accept 2-team banners since the
+# winning-team colour is the same family (red/blue/grey).  This protects
+# against regressions where extending the stripe palette to yellow/green
+# accidentally drops a 2-team red/blue/draw banner.
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "twoteams_banner_red_win.png",
+        "twoteams_banner_blue_win.png",
+        "20260329_163426.png",  # DRAW
+    ],
+)
+@pytest.mark.parametrize("teams", ["Three Teams", "Four Teams"])
+def test_multi_team_banner_accepts_two_team_winner_colours(filename, teams):
+    frame = _load(filename)
+    assert _detector._has_result_banner(frame, teams=teams), (
+        f"Multi-team detector should accept 2-team {filename} stripe colour"
+    )
+
+
