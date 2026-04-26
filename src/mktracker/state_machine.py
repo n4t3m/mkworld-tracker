@@ -61,13 +61,10 @@ _DEBUG_RANK_DIR = Path("debug_rank")
 # is enabled. Saved into <race_dir>/debug_placements/.
 _DEBUG_PLACEMENT_CONTEXT = 5
 
-# Roughly how far before track-name detection the voting roulette is on
-# screen.  When debug mode is on we save the buffered frame closest to
-# this offset as <race_dir>/debug_votes.png.
-_DEBUG_VOTES_OFFSET_S = 1.5
-# Cap on the rolling pre-track buffer (frames + monotonic timestamps).
-# Detection in WAITING_FOR_TRACK_PICK runs every ~500 ms, so 12 entries
-# covers ~6 s of history — plenty of slack around the 1.5 s target.
+# Cap on the rolling pre-track buffer dumped to <race_dir>/debug_votes/
+# in debug mode.  Detection in WAITING_FOR_TRACK_PICK runs every ~500 ms,
+# so 12 entries covers ~6 s of history — comfortably bracketing the
+# voting-roulette window that precedes the track-name banner.
 _DEBUG_VOTES_BUFFER_MAX = 12
 
 
@@ -477,7 +474,7 @@ class GameStateMachine:
         self._pending_track = result["track_name"]
         self._save_race_frame(frame, len(self._races) + 1, "track")
         if self.debug_mode:
-            self._save_votes_frame(len(self._races) + 1)
+            self._save_votes_frames(len(self._races) + 1)
         logger.info("Track detected: %s — reading players on next frame", self._pending_track)
         self._transition(GameState.READING_PLAYERS_IN_RACE)
 
@@ -1233,30 +1230,34 @@ class GameStateMachine:
         cv2.imwrite(str(path), frame)
         logger.debug("Saved debug frame: %s", path)
 
-    def _save_votes_frame(self, race_num: int) -> None:
-        """Save the buffered frame closest to ``_DEBUG_VOTES_OFFSET_S``
-        before now as ``debug_votes.png`` in the race folder.
+    def _debug_votes_dir(self, race_num: int) -> Path:
+        d = self._race_dir(race_num) / "debug_votes"
+        d.mkdir(exist_ok=True)
+        return d
+
+    def _save_votes_frames(self, race_num: int) -> None:
+        """Dump the entire rolling pre-track buffer to
+        ``<race_dir>/debug_votes/vote_NN.png``.
 
         The voting roulette appears briefly before the track-name banner;
-        rather than detect it we just rewind through the rolling buffer
-        of frames sampled during ``WAITING_FOR_TRACK_PICK``.  No-op if
-        the buffer is empty (e.g. debug mode was toggled on partway
-        through the state).
+        rather than detect it we just keep every frame sampled during
+        ``WAITING_FOR_TRACK_PICK``.  Frames are saved in chronological
+        order (oldest first), so ``vote_01.png`` is the earliest
+        buffered frame and the highest-numbered file is the frame just
+        before track detection fired.  No-op if the buffer is empty
+        (e.g. debug mode was toggled on partway through the state).
         """
         if not self._pre_track_buffer:
             return
-        target_ts = time.monotonic() - _DEBUG_VOTES_OFFSET_S
-        ts, vote_frame = min(
-            self._pre_track_buffer,
-            key=lambda entry: abs(entry[0] - target_ts),
-        )
-        race_dir = self._race_dir(race_num)
-        path = race_dir / "debug_votes.png"
-        cv2.imwrite(str(path), vote_frame)
-        logger.debug(
-            "Debug: saved votes frame %.2fs before track detection: %s",
-            time.monotonic() - ts, path,
-        )
+        out_dir = self._debug_votes_dir(race_num)
+        now = time.monotonic()
+        for i, (ts, vote_frame) in enumerate(self._pre_track_buffer, start=1):
+            path = out_dir / f"vote_{i:02d}.png"
+            cv2.imwrite(str(path), vote_frame)
+            logger.debug(
+                "Debug: saved votes frame %d (%.2fs before track detection): %s",
+                i, now - ts, path,
+            )
 
     def _save_frame(self, frame: np.ndarray, label: str) -> None:
         if self._match_dir is None:
