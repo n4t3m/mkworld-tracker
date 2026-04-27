@@ -12,6 +12,15 @@ Supported layouts:
   Bars are grey (low saturation, mid brightness); the gold first-place bar
   is at the top.
 
+* **No Teams, >12 players** — two columns side by side (12 + 12 layout).
+
+* **Three Teams / Four Teams** — N equal-sized columns (red/blue/yellow
+  for 3-team, +green for 4-team).  Best-effort OCR: yellow bars carry
+  dark-on-light text (BINARY_INV Otsu); green bars share the V-channel
+  unsharp pipeline used for blue.  The gold first-place bar appears in
+  the winning team's column and is only fully handled in the red column;
+  for non-red winners, the first-place player's name may misread.
+
 Readiness is checked via hue-based bar counting (coloured bars must be
 fully visible).  Names and scores are then OCR'd from each column using
 team-colour-specific binarisation:
@@ -21,6 +30,9 @@ team-colour-specific binarisation:
 * **Blue column** — unsharp-mask on the V channel followed by Otsu.
   Blue-bar text has only ~10 levels of V contrast with the background, so
   name accuracy is limited (scores are more reliable).
+* **Yellow column** — ``BINARY_INV`` Otsu on grayscale.  Yellow bars
+  carry near-black text on a bright yellow background.
+* **Green column** — V-channel unsharp + Otsu, like the blue column.
 * **No-teams grey bars** — hybrid ``(gray>170 & blue>100)`` threshold,
   which cleanly isolates white text on both grey and gold bars.
 """
@@ -147,6 +159,50 @@ _TT_BANNER_GREEN_H_LO = 40
 _TT_BANNER_GREEN_H_HI = 85
 _TT_BANNER_GREEN_SAT_MIN = 100
 
+# Multi-team (3/4 teams) layout — per-team x-extent of the bars.
+#
+# The 3-team layout centres three bars across the screen with substantial
+# horizontal padding (bars span x≈0.10..0.90, leaving ~10 % blank on each
+# side).  The 4-team layout packs four bars edge-to-edge (x≈0..1.00).  These
+# offsets matter for OCR — using equal-thirds for 3-team would clip the
+# right side of each red bar (where the score lives) and miss the left side
+# of each yellow bar.
+#
+# Bars y-range also varies: 3-team packs 8 players per column so bars start
+# higher (y≈0.50) than the 4-team layout's 6-per-column (y≈0.59).
+_MT_LAYOUTS: dict[int, dict] = {
+    3: {
+        "y1": 0.50,
+        "columns": (
+            (0.080, 0.400),
+            (0.340, 0.660),
+            (0.600, 0.920),
+        ),
+        "teams": ("red", "blue", "yellow"),
+        # Wider columns; rank+avatar take ~22 % to reach the name start.
+        "text_skip": 0.22,
+    },
+    4: {
+        "y1": 0.59,
+        "columns": (
+            (0.000, 0.250),
+            (0.250, 0.500),
+            (0.500, 0.750),
+            (0.750, 1.000),
+        ),
+        "teams": ("red", "blue", "yellow", "green"),
+        # Tight 4-column packing — bars span the full column, so the rank
+        # emblem + avatar only consume ~12 % of column width before the name.
+        "text_skip": 0.12,
+    },
+}
+_MT_BARS_Y2 = _BARS_Y2
+# Readiness threshold: total saturated-pixel fraction across the bar region.
+# The "loading" frame (banner up, no panels yet) sits well below 0.10 because
+# the only saturated content is incidental scenery.  Real loaded screens are
+# >= 0.30 (most of the bar area is saturated team colour).
+_MT_BAR_REGION_SAT_MIN = 0.20
+
 
 class MatchResultDetector:
     """Detect and read final match results from the CONGRATULATIONS! screen."""
@@ -164,12 +220,16 @@ class MatchResultDetector:
         is fully loaded and all players are readable.  Returns ``None``
         when the screen is not ready (still loading, wrong screen, etc.).
         """
-        if teams != "No Teams" and player_count <= 12:
+        if teams == "Two Teams" and player_count <= 12:
             return self._detect_two_teams(frame, player_count)
         if teams == "No Teams" and player_count <= 12:
             return self._detect_no_teams(frame, player_count)
         if teams == "No Teams" and player_count <= 24:
             return self._detect_no_teams_24(frame, player_count)
+        if teams == "Three Teams" and player_count <= 24:
+            return self._detect_multi_team(frame, player_count, team_count=3)
+        if teams == "Four Teams" and player_count <= 24:
+            return self._detect_multi_team(frame, player_count, team_count=4)
         return None
 
     # ------------------------------------------------------------------
@@ -254,6 +314,113 @@ class MatchResultDetector:
         per_col = player_count // 2
         all_results = left_results[:per_col] + right_results[:per_col]
         return {"results": all_results}
+
+    # ------------------------------------------------------------------
+    # Multi-team layout (3/4 teams) — N equal-width columns, best-effort OCR
+    # ------------------------------------------------------------------
+
+    def _detect_multi_team(
+        self, frame: np.ndarray, player_count: int, *, team_count: int,
+    ) -> dict | None:
+        """Best-effort OCR of a 3-team or 4-team CONGRATULATIONS! screen.
+
+        Layout: N equal-width columns spanning the full frame, each
+        containing rank+icon+name+score rows for that team's players.
+        Per-team binarisation is chosen by column index — red/blue use
+        the existing 2-team strategies; yellow uses ``BINARY_INV`` Otsu
+        because the bars carry dark text on a bright yellow background;
+        green reuses the V-channel unsharp+Otsu strategy used for blue.
+
+        The first-place player's bar is always gold, regardless of which
+        team won.  The red column already handles this via the existing
+        gold override; for non-red columns the gold bar may slightly
+        misread the winning player's name (best-effort, not a hard
+        guarantee).
+
+        Returns ``None`` if the banner is not yet visible OR the
+        team-score panels and bars beneath it haven't loaded — the
+        screen briefly shows just the banner before the rest fades in.
+        """
+        teams_label = "Three Teams" if team_count == 3 else "Four Teams"
+        if not self._has_result_banner(frame, teams=teams_label):
+            logger.debug(
+                "%s match results not ready: banner not detected", teams_label,
+            )
+            return None
+
+        h, w = frame.shape[:2]
+        layout = _MT_LAYOUTS[team_count]
+        y1, y2 = int(h * layout["y1"]), int(h * _MT_BARS_Y2)
+        bars = frame[y1:y2, :]
+        if not self._multi_team_bars_ready(bars):
+            logger.debug(
+                "%s match results not ready: bar region under-saturated",
+                teams_label,
+            )
+            return None
+
+        per_team = max(player_count // team_count, 1)
+        text_skip = layout["text_skip"]
+        all_results: list[tuple[str, int]] = []
+        for (cx1, cx2), kind in zip(layout["columns"], layout["teams"]):
+            col = bars[:, int(w * cx1):int(w * cx2)]
+            results = self._read_multi_team_column(
+                col, team=kind, text_skip=text_skip,
+            )
+            all_results.extend(results[:per_team])
+        return {"results": all_results}
+
+    @staticmethod
+    def _multi_team_bars_ready(bars: np.ndarray) -> bool:
+        """Reject the brief load-in window where the banner is visible
+        but the team-score panels and player bars haven't appeared yet.
+
+        Real loaded screens have ≥30 % of the bar region in saturated
+        colour; the loading frame is well under 10 %.  The 0.20 threshold
+        comfortably separates the two without depending on which team
+        won (gold bar contributions vary by team)."""
+        hsv = cv2.cvtColor(bars, cv2.COLOR_BGR2HSV)
+        saturated = (hsv[:, :, 1] > 120) & (hsv[:, :, 2] > 80)
+        return float(saturated.mean()) >= _MT_BAR_REGION_SAT_MIN
+
+    def _read_multi_team_column(
+        self, col_img: np.ndarray, *, team: str, text_skip: float,
+    ) -> list[tuple[str, int]]:
+        """Read player names and scores from one team's column."""
+        ch, cw = col_img.shape[:2]
+        text_x1 = int(cw * text_skip)
+        text_region = col_img[:, text_x1:]
+        tw = text_region.shape[1]
+
+        if team == "red":
+            binary = self._binarise_red(text_region)
+        elif team == "blue":
+            binary = self._binarise_blue(text_region)
+        elif team == "yellow":
+            binary = self._binarise_yellow(text_region)
+        elif team == "green":
+            binary = self._binarise_green(text_region)
+        else:
+            raise ValueError(f"Unknown team kind: {team!r}")
+
+        up = cv2.resize(
+            binary, None, fx=_UPSCALE, fy=_UPSCALE,
+            interpolation=cv2.INTER_CUBIC,
+        )
+
+        data = pytesseract.image_to_data(
+            up, config="--psm 6",
+            output_type=pytesseract.Output.DICT,
+        )
+        words = self._extract_words(data, tw)
+        rows = self._group_into_rows(words)
+
+        results: list[tuple[str, int]] = []
+        for row in rows:
+            name, score = self._parse_row(row)
+            if name and score is not None:
+                results.append((name, score))
+        return results
 
     def _read_no_teams_column(
         self, col_img: np.ndarray, *, text_skip: float = _TEXT_SKIP_X,
@@ -578,6 +745,48 @@ class MatchResultDetector:
         Blue-bar text has only ~10 levels of V-channel contrast with the
         background.  An unsharp mask amplifies local brightness differences
         before Otsu thresholding.
+        """
+        v = cv2.cvtColor(text_region, cv2.COLOR_BGR2HSV)[:, :, 2]
+        blurred = cv2.GaussianBlur(v, (21, 21), 0)
+        sharp = cv2.addWeighted(
+            v.astype(np.float32), 3.0,
+            blurred.astype(np.float32), -2.0, 0,
+        )
+        sharp = np.clip(sharp, 0, 255).astype(np.uint8)
+        _, binary = cv2.threshold(
+            sharp, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+        )
+        return binary
+
+    @staticmethod
+    def _binarise_yellow(text_region: np.ndarray) -> np.ndarray:
+        """Inverted Otsu for dark text on yellow bars.
+
+        Yellow team bars carry near-black text on a bright yellow
+        background, the opposite polarity from red/blue/green where
+        text is white-on-colour.  Plain Otsu would emit black text on a
+        white background and Tesseract would invert it back, but
+        ``THRESH_BINARY_INV`` is more deterministic and avoids the
+        thresholding ambiguity when the gold first-place bar is at the
+        column top (gold is bright and yellow-ish — Otsu still picks
+        the foreground/background split correctly).
+        """
+        gray = cv2.cvtColor(text_region, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
+        _, binary = cv2.threshold(
+            blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+        )
+        return binary
+
+    @staticmethod
+    def _binarise_green(text_region: np.ndarray) -> np.ndarray:
+        """V-channel unsharp + Otsu for green bars.
+
+        Green bars carry white-on-colour text with similar low V-channel
+        contrast to blue bars, so the same unsharp-mask + Otsu approach
+        applies.  When the green team wins, the gold first-place bar at
+        the column top has dark text instead of white — the winning
+        player's name is best-effort and may misread.
         """
         v = cv2.cvtColor(text_region, cv2.COLOR_BGR2HSV)[:, :, 2]
         blurred = cv2.GaussianBlur(v, (21, 21), 0)

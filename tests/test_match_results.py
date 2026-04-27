@@ -227,6 +227,49 @@ def test_multi_team_banner_rejects_non_team_screens(filename, teams):
     )
 
 
+# ---------------------------------------------------------------------------
+# 3/4-team full-OCR detect() — best-effort name+score reading.  Detection
+# is structurally similar to the 2-team layout but with N equal-width
+# columns and team-colour-specific binarisation (yellow uses BINARY_INV
+# Otsu for dark-on-light text; green reuses the V-channel unsharp+Otsu
+# pipeline used for blue).  Tests assert that *some* placements are read
+# (>= 75 % of expected) without pinning exact OCR strings — Tesseract on
+# small / coloured-bar text is too noisy to spell-check precisely.  The
+# loading frame must still return None.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "filename,teams,player_count,min_results",
+    [
+        ("threeteams_banner_yellow_win.png", "Three Teams", 24, 18),
+        ("fourteams_banner_green_win.png", "Four Teams", 24, 18),
+    ],
+)
+def test_detects_multi_team_result_screen(
+    filename, teams, player_count, min_results,
+):
+    frame = _load(filename)
+    result = _detector.detect(
+        frame, teams=teams, player_count=player_count,
+    )
+    assert result is not None, f"Expected positive detection for {filename}"
+    assert "results" in result
+    assert len(result["results"]) >= min_results, (
+        f"{filename}: expected at least {min_results} placements, "
+        f"got {len(result['results'])}"
+    )
+
+
+def test_rejects_multi_team_loading_frame_in_detect():
+    """The loading frame (banner up, bars not yet rendered) must return
+    None from full detect() so the state machine keeps polling."""
+    frame = _load("fourteams_banner_green_win_loading.png")
+    result = _detector.detect(
+        frame, teams="Four Teams", player_count=24,
+    )
+    assert result is None
+
+
 # Existing 2-team banner cases must still register under the 2-team path,
 # and the 3/4-team detector must also accept 2-team banners since the
 # winning-team colour is the same family (red/blue/grey).  This protects
