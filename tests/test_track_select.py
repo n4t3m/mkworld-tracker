@@ -32,6 +32,13 @@ def _load(path: str):
         # because the canonical list had "Wario's Galleon" instead of the
         # actual in-game name.
         (os.path.join(_FIXTURE_DIR, "wario_shipyard.png"), "Wario Shipyard"),
+        # Regression: bright team-color bars on the left panel + dark map on
+        # the right defeated the old left/right brightness pre-check.
+        (os.path.join(_FIXTURE_DIR, "acorn_heights_team_mode.png"), "Acorn Heights"),
+        (os.path.join(_FIXTURE_DIR, "wario_stadium_team_mode.png"), "Wario Stadium"),
+        # Bowser's Castle: 24-player layout widens the player panel beyond
+        # the old 42% boundary, also breaking the pre-check.
+        (os.path.join(_TESTDATA_DIR, "bowserscastle.png"), "Bowser's Castle"),
     ],
 )
 def test_detects_track_name(filename, expected):
