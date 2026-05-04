@@ -52,6 +52,38 @@ _PROMPT = (
     "exactly once, ordered by placement ascending, with no duplicates and no gaps."
 )
 
+# Maps the MatchSettings.teams string to the schema-level mode hint.
+_TEAMS_MODE_MAP = {
+    "No Teams": ("no_teams", 1),
+    "Two Teams": ("two_teams", 2),
+    "Three Teams": ("three_teams", 3),
+    "Four Teams": ("four_teams", 4),
+}
+
+
+def _build_prompt(teams_setting: str | None) -> str:
+    """Return the base prompt, optionally with an authoritative team-mode hint."""
+    if not teams_setting:
+        return _PROMPT
+    hint = _TEAMS_MODE_MAP.get(teams_setting)
+    if hint is None:
+        return _PROMPT
+    mode, count = hint
+    if count == 1:
+        suffix = (
+            f" The match is configured in '{teams_setting}' mode — set mode='{mode}' "
+            "and return a single team containing every player with name, race_points, "
+            "and race_winner all null. Do not split players into multiple teams."
+        )
+    else:
+        suffix = (
+            f" The match is configured in '{teams_setting}' mode — set mode='{mode}' "
+            f"and split the 12 players into exactly {count} teams of 3 by bar colour. "
+            "Trust this configuration over your own colour analysis if the frames are "
+            "ambiguous; do not return no_teams or any other team count."
+        )
+    return _PROMPT + suffix
+
 _RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -95,7 +127,13 @@ def _encode_frame(frame: np.ndarray) -> str:
     return base64.b64encode(buf.tobytes()).decode("utf-8")
 
 
-def _query_gemini(frames_b64: list[str], api_key: str, model: str) -> str:
+def _query_gemini(
+    frames_b64: list[str],
+    api_key: str,
+    model: str,
+    *,
+    prompt: str = _PROMPT,
+) -> str:
     """Send the frames to Gemini and return the raw response text."""
     url = f"{_BASE_URL}/{model}:generateContent?key={api_key}"
 
@@ -107,7 +145,7 @@ def _query_gemini(frames_b64: list[str], api_key: str, model: str) -> str:
                 "data": b64,
             }
         })
-    parts.append({"text": _PROMPT})
+    parts.append({"text": prompt})
 
     payload = {
         "contents": [{"parts": parts}],
@@ -130,20 +168,21 @@ def _query_gemini(frames_b64: list[str], api_key: str, model: str) -> str:
         result = json.loads(resp.read().decode("utf-8"))
 
     text = result["candidates"][0]["content"]["parts"][0]["text"]
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1]
-        text = text.rsplit("```", 1)[0].strip()
-
-    return text
+    return _strip_markdown(text)
 
 
 def _strip_markdown(text: str) -> str:
-    """Strip markdown code fences if present."""
+    """Strip leading and/or trailing markdown code fences if present.
+
+    Handles three malformed shapes the model has been observed emitting:
+    a properly fenced block, a leading fence with no closing fence, and
+    raw JSON followed by a stray closing fence with no opening one.
+    """
     text = text.strip()
     if text.startswith("```"):
-        text = text.split("\n", 1)[-1]
-        text = text.rsplit("```", 1)[0].strip()
+        text = text.split("\n", 1)[-1].strip()
+    if text.endswith("```"):
+        text = text[: -len("```")].rstrip()
     return text
 
 
@@ -182,13 +221,18 @@ def request_race_results(
     race_num: int,
     callback: Callable[[dict | None, list[tuple[int, str]]], None],
     log_dir: Path | None = None,
+    *,
+    teams_setting: str | None = None,
 ) -> None:
     """Fire-and-forget: query Gemini for race results from *frames*.
 
     *race_num* is the 1-based race number used for logging.
     *log_dir* is an optional directory where a ``gemini_results.txt`` file
     will be written with the prompt, raw response, and parsed result.
-    The *callback* is invoked from a background thread with
+    *teams_setting* is the authoritative ``MatchSettings.teams`` value
+    (e.g. ``"Four Teams"``); when provided it is folded into the prompt as
+    a hard constraint so Gemini doesn't have to guess team mode from bar
+    colours alone. The *callback* is invoked from a background thread with
     ``(parsed_dict, placements)`` on success, or ``(None, [])`` on failure.
     The caller is responsible for thread-safe handling in the callback.
     """
@@ -199,6 +243,7 @@ def request_race_results(
         return
 
     model = load_model()
+    prompt = _build_prompt(teams_setting)
     logger.info("Requesting race results for race %d (%d frames)", race_num, len(frames))
 
     def _write_log(sections: list[tuple[str, str]]) -> None:
@@ -220,11 +265,11 @@ def request_race_results(
     def _worker() -> None:
         try:
             frames_b64 = [_encode_frame(f) for f in frames]
-            text = _query_gemini(frames_b64, api_key, model)
+            text = _query_gemini(frames_b64, api_key, model, prompt=prompt)
         except Exception:
             logger.exception("Gemini results request failed for race %d", race_num)
             _write_log([
-                ("Prompt", _PROMPT),
+                ("Prompt", prompt),
                 ("Model", model),
                 ("Frames", str(len(frames))),
                 ("Error", traceback.format_exc()),
@@ -240,7 +285,7 @@ def request_race_results(
                 race_num, text,
             )
             _write_log([
-                ("Prompt", _PROMPT),
+                ("Prompt", prompt),
                 ("Model", model),
                 ("Frames", str(len(frames))),
                 ("Response", text),

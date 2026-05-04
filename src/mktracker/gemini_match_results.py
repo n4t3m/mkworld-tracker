@@ -100,12 +100,17 @@ def _encode_frame(frame: np.ndarray) -> str:
 
 
 def _strip_markdown(text: str) -> str:
-    """Strip markdown code fences if present."""
+    """Strip leading and/or trailing markdown code fences if present.
+
+    Handles three malformed shapes the model has been observed emitting:
+    a properly fenced block, a leading fence with no closing fence, and
+    raw JSON followed by a stray closing fence with no opening one.
+    """
     text = text.strip()
     if text.startswith("```"):
-        # Remove opening fence (may include language tag like ```json)
-        text = text.split("\n", 1)[-1]
-        text = text.rsplit("```", 1)[0].strip()
+        text = text.split("\n", 1)[-1].strip()
+    if text.endswith("```"):
+        text = text[: -len("```")].rstrip()
     return text
 
 

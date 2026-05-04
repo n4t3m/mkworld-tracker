@@ -47,6 +47,7 @@ from mktracker.gemini_rank import (
     _query_gemini as query_rank,
 )
 from mktracker.gemini_results import (
+    _build_prompt as build_results_prompt,
     _PROMPT as RESULTS_PROMPT,
     _encode_frame as encode_results_frame,
     _parse_results as parse_race_results,
@@ -162,13 +163,15 @@ def _call_rank(
 
 def _call_race_results(
     frames: list[np.ndarray], api_key: str, model: str, log_dir: Path,
+    *, teams_setting: str | None = None,
 ) -> dict | None:
+    prompt = build_results_prompt(teams_setting)
     try:
         frames_b64 = [encode_results_frame(f) for f in frames]
-        text = query_race_results(frames_b64, api_key, model)
+        text = query_race_results(frames_b64, api_key, model, prompt=prompt)
     except Exception:
         _log_gemini(log_dir, "gemini_results.txt", [
-            ("Prompt", RESULTS_PROMPT),
+            ("Prompt", prompt),
             ("Model", model),
             ("Frames", str(len(frames))),
             ("Error", traceback.format_exc()),
@@ -179,7 +182,7 @@ def _call_race_results(
         parsed = parse_race_results(text)
     except (json.JSONDecodeError, ValueError, KeyError, TypeError):
         _log_gemini(log_dir, "gemini_results.txt", [
-            ("Prompt", RESULTS_PROMPT),
+            ("Prompt", prompt),
             ("Model", model),
             ("Frames", str(len(frames))),
             ("Response", text),
@@ -188,7 +191,7 @@ def _call_race_results(
         return None
 
     _log_gemini(log_dir, "gemini_results.txt", [
-        ("Prompt", RESULTS_PROMPT),
+        ("Prompt", prompt),
         ("Model", model),
         ("Frames", str(len(frames))),
         ("Response", text),
@@ -374,7 +377,10 @@ def _build_race_record(
             race_number, len(placement_paths), len(frames),
         )
         if frames:
-            data = _call_race_results(frames, api_key, model, race_dir)
+            data = _call_race_results(
+                frames, api_key, model, race_dir,
+                teams_setting=teams_setting,
+            )
             if data is not None:
                 mode, placements, teams = _race_structures_from_results(data)
 

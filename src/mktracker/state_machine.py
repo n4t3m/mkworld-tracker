@@ -825,12 +825,16 @@ class GameStateMachine:
             race_index = len(self._races) - 1
             race_num = race_index + 1
             race_log_dir = self._race_dir(race_num)
+            teams_setting = (
+                self._match_settings.teams if self._match_settings else None
+            )
             request_race_results(
                 list(self._result_frames), race_num,
                 self._make_results_callback(
                     race_index, self._match_seq, self._match_dir,
                 ),
                 log_dir=race_log_dir,
+                teams_setting=teams_setting,
             )
             self._result_frames = []
             return

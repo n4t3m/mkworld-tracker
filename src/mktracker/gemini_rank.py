@@ -87,21 +87,21 @@ def _query_gemini(image_b64: str, api_key: str, model: str) -> str:
         result = json.loads(resp.read().decode("utf-8"))
 
     text = result["candidates"][0]["content"]["parts"][0]["text"]
-    text = text.strip()
-    # Strip markdown code fences if present.
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1]
-        text = text.rsplit("```", 1)[0].strip()
-
-    return text
+    return _strip_markdown(text)
 
 
 def _strip_markdown(text: str) -> str:
-    """Strip markdown code fences if present."""
+    """Strip leading and/or trailing markdown code fences if present.
+
+    Handles three malformed shapes the model has been observed emitting:
+    a properly fenced block, a leading fence with no closing fence, and
+    raw text followed by a stray closing fence with no opening one.
+    """
     text = text.strip()
     if text.startswith("```"):
-        text = text.split("\n", 1)[-1]
-        text = text.rsplit("```", 1)[0].strip()
+        text = text.split("\n", 1)[-1].strip()
+    if text.endswith("```"):
+        text = text[: -len("```")].rstrip()
     return text
 
 

@@ -245,9 +245,11 @@ class _RaceCard(QFrame):
 
     def _build_placements(self, race: RaceRecord) -> QWidget | None:
         if race.teams and len(race.teams) >= 2:
-            return self._build_team_placements(race.teams)
+            inner = self._build_team_placements(race.teams)
+            return self._wrap_with_regenerate(race, inner)
         if race.placements:
-            return self._build_solo_placements(race)
+            inner = self._build_solo_placements(race)
+            return self._wrap_with_regenerate(race, inner)
         if self._live:
             note = QLabel("Awaiting placements…")
             note.setStyleSheet("QLabel { color: #c93; font-style: italic; }")
@@ -256,26 +258,51 @@ class _RaceCard(QFrame):
         # Non-live, no placements: show the message and a regenerate button
         # when the user has Gemini configured and we have placement frames on
         # disk to feed back in.
-        container = QWidget()
-        row = QHBoxLayout(container)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
         note = QLabel("No placements recorded.")
         note.setStyleSheet("QLabel { color: #666; font-style: italic; }")
-        row.addWidget(note)
-        row.addStretch()
-        if self._can_regenerate(race):
-            btn = QPushButton("↻  Regenerate")
-            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            btn.setToolTip(
-                "Re-run Gemini against the saved placement_*.png frames"
-            )
-            self._apply_regenerate_button_style(btn, in_progress=False)
-            btn.clicked.connect(
-                lambda: self.refetchPlacementsRequested.emit(self._race_number),
-            )
-            self._regenerate_btn = btn
+        return self._wrap_with_regenerate(race, note, inline=True)
+
+    def _wrap_with_regenerate(
+        self, race: RaceRecord, inner: QWidget, *, inline: bool = False,
+    ) -> QWidget:
+        """Attach a Regenerate button to *inner* when applicable.
+
+        When *inline* is True the button sits on the same row as *inner*
+        (used for the "No placements recorded." message); otherwise a
+        small button row is rendered above the placement list.
+        """
+        if not self._can_regenerate(race):
+            return inner
+
+        btn = QPushButton("↻  Regenerate")
+        btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn.setToolTip("Re-run Gemini against the saved placement_*.png frames")
+        self._apply_regenerate_button_style(btn, in_progress=False)
+        btn.clicked.connect(
+            lambda: self.refetchPlacementsRequested.emit(self._race_number),
+        )
+        self._regenerate_btn = btn
+
+        if inline:
+            container = QWidget()
+            row = QHBoxLayout(container)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
+            row.addWidget(inner)
+            row.addStretch()
             row.addWidget(btn)
+            return container
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addStretch()
+        header.addWidget(btn)
+        layout.addLayout(header)
+        layout.addWidget(inner)
         return container
 
     def _can_regenerate(self, race: RaceRecord) -> bool:
@@ -969,11 +996,14 @@ class _RefetchPlacementsThread(QThread):
         race_number: int,
         log_dir: Path,
         parent=None,
+        *,
+        teams_setting: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._frames = frames
         self._race_number = race_number
         self._log_dir = log_dir
+        self._teams_setting = teams_setting
 
     def run(self) -> None:
         import threading
@@ -986,7 +1016,9 @@ class _RefetchPlacementsThread(QThread):
             done.set()
 
         request_race_results(
-            self._frames, self._race_number, cb, log_dir=self._log_dir,
+            self._frames, self._race_number, cb,
+            log_dir=self._log_dir,
+            teams_setting=self._teams_setting,
         )
         done.wait()
         self.finished.emit(holder["parsed"])
@@ -2051,8 +2083,12 @@ class MatchDetailView(QWidget):
             return
 
         match_id = record.match_id
+        teams_setting = (
+            record.settings.teams if record.settings is not None else None
+        )
         thread = _RefetchPlacementsThread(
             frames, race_number, race_dir, parent=self,
+            teams_setting=teams_setting,
         )
         thread.finished.connect(
             lambda parsed: self._on_refetch_placements_finished(
