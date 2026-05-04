@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QCursor, QGuiApplication, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
@@ -36,6 +36,8 @@ from PySide6.QtWidgets import (
 )
 
 from mktracker.detection.tracks import TRACK_ICONS_DIR, TRACK_IMAGES
+from mktracker.gemini_client import load_api_key
+from mktracker.gemini_match_results import request_match_results
 from mktracker.lorenzi_text import standings_to_text, text_to_standings
 from mktracker.match_record import (
     DEFAULT_MATCHES_DIR,
@@ -45,6 +47,7 @@ from mktracker.match_record import (
     MatchSettingsRecord,
     RaceRecord,
     TeamGroup,
+    final_standings_from_gemini,
     list_matches,
 )
 from mktracker.table_generator import generate_table
@@ -788,13 +791,49 @@ class _TableEditDialog(QDialog):
         self.accept()
 
 
+class _RefetchTableThread(QThread):
+    """Re-runs the Gemini match-results call against ``match_results.png``.
+
+    Synchronously bridges the existing fire-and-forget
+    :func:`request_match_results` API into a QThread so the caller gets a
+    single ``finished(parsed)`` signal on the Qt event loop.
+    """
+
+    finished = Signal(object)  # parsed dict | None
+
+    def __init__(self, frame, log_dir: Path, parent=None) -> None:
+        super().__init__(parent)
+        self._frame = frame
+        self._log_dir = log_dir
+
+    def run(self) -> None:
+        import threading
+        done = threading.Event()
+        holder: dict[str, object | None] = {"parsed": None}
+
+        def cb(parsed, results) -> None:  # noqa: ARG001 — results unused
+            del results
+            holder["parsed"] = parsed
+            done.set()
+
+        request_match_results(self._frame, cb, log_dir=self._log_dir)
+        done.wait()
+        self.finished.emit(holder["parsed"])
+
+
 class _TableImageCard(QFrame):
     """Embeds the generated Lorenzi-style results table image."""
 
     editRequested = Signal()
-    regenerateRequested = Signal()
+    refetchRequested = Signal()
 
-    def __init__(self, path: Path, *, show_edit_button: bool = True) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        show_edit_button: bool = True,
+        show_refetch_button: bool = False,
+    ) -> None:
         super().__init__()
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet(
@@ -839,14 +878,16 @@ class _TableImageCard(QFrame):
             edit_btn.clicked.connect(self.editRequested.emit)
             header_row.addWidget(edit_btn)
 
-            regen_btn = QPushButton("Regenerate Table")
-            regen_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            regen_btn.setStyleSheet(btn_style)
-            regen_btn.setToolTip(
-                "Re-render table.png from the current match data",
-            )
-            regen_btn.clicked.connect(self.regenerateRequested.emit)
-            header_row.addWidget(regen_btn)
+            if show_refetch_button:
+                self._refetch_btn = QPushButton("Regenerate Table")
+                self._refetch_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                self._refetch_btn.setStyleSheet(btn_style)
+                self._refetch_btn.setToolTip(
+                    "Re-run Gemini against match_results.png and rebuild "
+                    "the final standings",
+                )
+                self._refetch_btn.clicked.connect(self.refetchRequested.emit)
+                header_row.addWidget(self._refetch_btn)
         layout.addLayout(header_row)
 
         image_label = QLabel()
@@ -863,6 +904,30 @@ class _TableImageCard(QFrame):
             image_label.setPixmap(scaled)
             image_label.setFixedSize(scaled.size())
         layout.addWidget(image_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+    def set_refetch_in_progress(self, in_progress: bool) -> None:
+        """Disable the regenerate button and grey it out while the Gemini
+        refetch is running."""
+        btn = getattr(self, "_refetch_btn", None)
+        if btn is None:
+            return
+        if in_progress:
+            btn.setEnabled(False)
+            btn.setText("Regenerating…")
+            btn.setStyleSheet(
+                "QPushButton { background-color: #1a1a1a; color: #666; border: none;"
+                " border-radius: 4px; padding: 6px 12px; font-weight: bold; }"
+            )
+            btn.setCursor(QCursor(Qt.CursorShape.ForbiddenCursor))
+        else:
+            btn.setEnabled(True)
+            btn.setText("Regenerate Table")
+            btn.setStyleSheet(
+                "QPushButton { background-color: #2a3b4a; color: #fff; border: none;"
+                " border-radius: 4px; padding: 6px 12px; font-weight: bold; }"
+                " QPushButton:hover { background-color: #35506b; }"
+            )
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
 
     def _copy_to_clipboard(self) -> None:
         if self._full_pixmap is None:
@@ -889,11 +954,13 @@ class _MatchTimelinePane(QScrollArea):
 
     raceSelected = Signal(int)  # race_number
     editTableRequested = Signal()
-    regenerateTableRequested = Signal()
+    refetchTableRequested = Signal()
 
     def __init__(self, matches_dir: Path = DEFAULT_MATCHES_DIR) -> None:
         super().__init__()
         self._matches_dir = matches_dir
+        self._refetch_in_progress = False
+        self._table_card: _TableImageCard | None = None
         self.setWidgetResizable(True)
         self._inner = QWidget()
         self._layout = QVBoxLayout(self._inner)
@@ -963,7 +1030,13 @@ class _MatchTimelinePane(QScrollArea):
         self._layout.addStretch()
 
     def clear(self) -> None:
+        self._table_card = None
         self._show_empty()
+
+    def set_refetch_in_progress(self, in_progress: bool) -> None:
+        self._refetch_in_progress = in_progress
+        if self._table_card is not None:
+            self._table_card.set_refetch_in_progress(in_progress)
 
     def set_record(
         self,
@@ -985,11 +1058,21 @@ class _MatchTimelinePane(QScrollArea):
         self._layout.addWidget(header)
 
         table_path = self._matches_dir / record.match_id / "table.png"
+        results_path = self._matches_dir / record.match_id / "match_results.png"
         if record.final_standings is not None and table_path.exists():
-            card = _TableImageCard(table_path, show_edit_button=not live)
+            card = _TableImageCard(
+                table_path,
+                show_edit_button=not live,
+                show_refetch_button=not live and results_path.exists(),
+            )
             card.editRequested.connect(self.editTableRequested.emit)
-            card.regenerateRequested.connect(self.regenerateTableRequested.emit)
+            card.refetchRequested.connect(self.refetchTableRequested.emit)
+            self._table_card = card
+            if self._refetch_in_progress:
+                card.set_refetch_in_progress(True)
             self._layout.addWidget(card)
+        else:
+            self._table_card = None
 
         races = sorted(record.races, key=lambda r: r.race_number)
         if races or live:
@@ -1500,11 +1583,13 @@ class MatchDetailView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        self._refetch_thread: _RefetchTableThread | None = None
+
         self._stack = QStackedWidget()
         self._timeline = _MatchTimelinePane(matches_dir=self._matches_dir)
         self._timeline.raceSelected.connect(self._on_race_selected)
         self._timeline.editTableRequested.connect(self._on_edit_table)
-        self._timeline.regenerateTableRequested.connect(self._on_regenerate_table)
+        self._timeline.refetchTableRequested.connect(self._on_refetch_table)
         self._race_detail = _RaceDetailView()
         self._race_detail.backRequested.connect(self._show_timeline)
 
@@ -1558,23 +1643,80 @@ class MatchDetailView(QWidget):
             self.set_record(updated)
             self.recordEdited.emit(record.match_id)
 
-    def _on_regenerate_table(self) -> None:
+    def _on_refetch_table(self) -> None:
         record = self._current_record
-        if record is None or record.final_standings is None:
+        if record is None:
+            return
+        if self._refetch_thread is not None and self._refetch_thread.isRunning():
             return
         match_dir = self._matches_dir / record.match_id
+        results_path = match_dir / "match_results.png"
+        if not results_path.exists():
+            QMessageBox.warning(
+                self, "Refetch failed",
+                f"No match_results.png in {match_dir.name}.",
+            )
+            return
+        if not load_api_key():
+            QMessageBox.warning(
+                self, "Refetch failed",
+                "No Gemini API key configured. Set one in the Settings tab.",
+            )
+            return
+        import cv2
+        frame = cv2.imread(str(results_path))
+        if frame is None:
+            QMessageBox.critical(
+                self, "Refetch failed",
+                f"Could not read {results_path.name}.",
+            )
+            return
+
+        match_id = record.match_id
+        thread = _RefetchTableThread(frame, match_dir, parent=self)
+        thread.finished.connect(
+            lambda parsed: self._on_refetch_finished(match_id, parsed)
+        )
+        self._refetch_thread = thread
+        self._timeline.set_refetch_in_progress(True)
+        thread.start()
+
+    def _on_refetch_finished(self, match_id: str, parsed: object) -> None:
+        self._timeline.set_refetch_in_progress(False)
+        if not isinstance(parsed, dict):
+            QMessageBox.warning(
+                self, "Refetch failed",
+                "Gemini did not return a usable response. See "
+                "gemini_match_results.txt in the match folder for details.",
+            )
+            return
+        match_dir = self._matches_dir / match_id
+        try:
+            record = MatchRecord.load(match_dir)
+        except (OSError, ValueError, KeyError) as exc:
+            QMessageBox.critical(
+                self, "Refetch failed",
+                f"Could not reload match record:\n{exc}",
+            )
+            return
+        record.final_standings = final_standings_from_gemini(parsed)
+        if record.completed_at is None:
+            record.completed_at = datetime.now().isoformat()
         try:
             png = generate_table(record)
             (match_dir / "table.png").write_bytes(png)
+        except Exception:
+            logger.exception("Failed to regenerate table after refetch")
+        try:
+            record.save(match_dir)
         except Exception as exc:
-            logger.exception("Failed to regenerate table")
             QMessageBox.critical(
-                self, "Regenerate failed",
-                f"Could not regenerate table:\n{exc}",
+                self, "Refetch failed",
+                f"Could not save match record:\n{exc}",
             )
             return
         self.set_record(record)
-        self.recordEdited.emit(record.match_id)
+        self.recordEdited.emit(match_id)
 
     def _on_race_selected(self, race_number: int) -> None:
         record = self._current_record

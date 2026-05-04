@@ -43,6 +43,7 @@ from mktracker.match_record import (
     PlayerPlacement,
     RaceRecord,
     TeamGroup,
+    final_standings_from_gemini,
 )
 from mktracker.table_generator import generate_table
 
@@ -996,35 +997,7 @@ class GameStateMachine:
         all_placements.sort(key=lambda pl: pl.place)
         return mode, teams, all_placements
 
-    @staticmethod
-    def _final_standings_from_gemini(gemini: dict) -> FinalStandings:
-        """Build :class:`FinalStandings` from a Gemini *match results*
-        response dict.  Used by both the live and stale write paths."""
-        mode = gemini.get("mode")
-        teams_list = gemini.get("teams") or []
-        teams: list[TeamGroup] = []
-        all_players: list[PlayerPlacement] = []
-        for team in teams_list:
-            tg_players: list[PlayerPlacement] = []
-            for p in team.get("players", []):
-                if p.get("place") is None:
-                    continue
-                score = p.get("score")
-                tg_players.append(PlayerPlacement(
-                    place=int(p["place"]),
-                    name=str(p.get("name", "")),
-                    score=int(score) if score is not None else None,
-                ))
-            teams.append(TeamGroup(
-                name=team.get("name"),
-                tag=team.get("tag"),
-                points=team.get("points"),
-                winner=team.get("winner"),
-                players=tg_players,
-            ))
-            all_players.extend(tg_players)
-        all_players.sort(key=lambda pl: pl.place)
-        return FinalStandings(mode=mode, players=all_players, teams=teams)
+    _final_standings_from_gemini = staticmethod(final_standings_from_gemini)
 
     @classmethod
     def _build_race_record(cls, race_number: int, race: RaceInfo) -> RaceRecord:

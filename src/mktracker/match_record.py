@@ -153,6 +153,35 @@ class FinalStandings:
         )
 
 
+def final_standings_from_gemini(gemini: dict[str, Any]) -> FinalStandings:
+    """Build :class:`FinalStandings` from a Gemini *match results* response."""
+    mode = gemini.get("mode")
+    teams_list = gemini.get("teams") or []
+    teams: list[TeamGroup] = []
+    all_players: list[PlayerPlacement] = []
+    for team in teams_list:
+        tg_players: list[PlayerPlacement] = []
+        for p in team.get("players", []):
+            if p.get("place") is None:
+                continue
+            score = p.get("score")
+            tg_players.append(PlayerPlacement(
+                place=int(p["place"]),
+                name=str(p.get("name", "")),
+                score=int(score) if score is not None else None,
+            ))
+        teams.append(TeamGroup(
+            name=team.get("name"),
+            tag=team.get("tag"),
+            points=team.get("points"),
+            winner=team.get("winner"),
+            players=tg_players,
+        ))
+        all_players.extend(tg_players)
+    all_players.sort(key=lambda pl: pl.place)
+    return FinalStandings(mode=mode, players=all_players, teams=teams)
+
+
 @dataclasses.dataclass
 class MatchSettingsRecord:
     cc_class: str
