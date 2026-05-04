@@ -9,6 +9,7 @@ update, so the on-disk record is always live.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,7 @@ from PySide6.QtWidgets import (
 from mktracker.detection.tracks import TRACK_ICONS_DIR, TRACK_IMAGES
 from mktracker.gemini_client import load_api_key
 from mktracker.gemini_match_results import request_match_results
+from mktracker.gemini_results import request_race_results
 from mktracker.lorenzi_text import standings_to_text, text_to_standings
 from mktracker.match_record import (
     DEFAULT_MATCHES_DIR,
@@ -49,6 +51,7 @@ from mktracker.match_record import (
     TeamGroup,
     final_standings_from_gemini,
     list_matches,
+    race_fields_from_gemini,
 )
 from mktracker.table_generator import generate_table
 
@@ -123,6 +126,7 @@ class _RaceCard(QFrame):
     """One race in the timeline: icon + track name + placements."""
 
     clicked = Signal(int)  # race_number
+    refetchPlacementsRequested = Signal(int)  # race_number
 
     def __init__(
         self,
@@ -130,11 +134,16 @@ class _RaceCard(QFrame):
         settings: MatchSettingsRecord,
         *,
         live: bool = False,
+        match_dir: Path | None = None,
+        api_key_available: bool = False,
     ) -> None:
         super().__init__()
         self._live = live
         self._settings = settings
         self._race_number = race.race_number
+        self._match_dir = match_dir
+        self._api_key_available = api_key_available
+        self._regenerate_btn: QPushButton | None = None
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.setStyleSheet(
@@ -242,10 +251,73 @@ class _RaceCard(QFrame):
         if self._live:
             note = QLabel("Awaiting placements…")
             note.setStyleSheet("QLabel { color: #c93; font-style: italic; }")
+            return note
+
+        # Non-live, no placements: show the message and a regenerate button
+        # when the user has Gemini configured and we have placement frames on
+        # disk to feed back in.
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        note = QLabel("No placements recorded.")
+        note.setStyleSheet("QLabel { color: #666; font-style: italic; }")
+        row.addWidget(note)
+        row.addStretch()
+        if self._can_regenerate(race):
+            btn = QPushButton("↻  Regenerate")
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setToolTip(
+                "Re-run Gemini against the saved placement_*.png frames"
+            )
+            self._apply_regenerate_button_style(btn, in_progress=False)
+            btn.clicked.connect(
+                lambda: self.refetchPlacementsRequested.emit(self._race_number),
+            )
+            self._regenerate_btn = btn
+            row.addWidget(btn)
+        return container
+
+    def _can_regenerate(self, race: RaceRecord) -> bool:
+        if not self._api_key_available:
+            return False
+        if self._match_dir is None:
+            return False
+        race_dir = self._match_dir / f"race_{race.race_number:02d}"
+        if not race_dir.exists():
+            return False
+        return any(race_dir.glob("placement_*.png"))
+
+    @staticmethod
+    def _apply_regenerate_button_style(
+        btn: QPushButton, *, in_progress: bool,
+    ) -> None:
+        if in_progress:
+            btn.setText("Regenerating…")
+            btn.setEnabled(False)
+            btn.setCursor(QCursor(Qt.CursorShape.ForbiddenCursor))
+            btn.setStyleSheet(
+                "QPushButton { background-color: #2a2a2a; color: #888;"
+                " border: 1px solid #333; border-radius: 4px;"
+                " padding: 4px 10px; font-size: 12px; font-weight: bold; }"
+            )
         else:
-            note = QLabel("No placements recorded.")
-            note.setStyleSheet("QLabel { color: #666; font-style: italic; }")
-        return note
+            btn.setText("↻  Regenerate")
+            btn.setEnabled(True)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setStyleSheet(
+                "QPushButton { background-color: #2a3b4a; color: #fff;"
+                " border: none; border-radius: 4px; padding: 4px 10px;"
+                " font-size: 12px; font-weight: bold; }"
+                " QPushButton:hover { background-color: #35506b; }"
+            )
+
+    def set_refetch_in_progress(self, in_progress: bool) -> None:
+        if self._regenerate_btn is None:
+            return
+        self._apply_regenerate_button_style(
+            self._regenerate_btn, in_progress=in_progress,
+        )
 
     def _build_solo_placements(self, race: RaceRecord) -> QWidget:
         container = QWidget()
@@ -881,6 +953,105 @@ class _RefetchTableThread(QThread):
         self.finished.emit(holder["parsed"])
 
 
+class _RefetchPlacementsThread(QThread):
+    """Re-runs the Gemini race-results call against the saved ``placement_*.png``
+    frames for one race.
+
+    Bridges :func:`request_race_results` into a single
+    ``finished(parsed)`` Qt signal.
+    """
+
+    finished = Signal(object)  # parsed dict | None
+
+    def __init__(
+        self,
+        frames: list,
+        race_number: int,
+        log_dir: Path,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._frames = frames
+        self._race_number = race_number
+        self._log_dir = log_dir
+
+    def run(self) -> None:
+        import threading
+        done = threading.Event()
+        holder: dict[str, object | None] = {"parsed": None}
+
+        def cb(parsed, placements) -> None:  # noqa: ARG001 — placements unused
+            del placements
+            holder["parsed"] = parsed
+            done.set()
+
+        request_race_results(
+            self._frames, self._race_number, cb, log_dir=self._log_dir,
+        )
+        done.wait()
+        self.finished.emit(holder["parsed"])
+
+
+class _RefetchPlacementsConfirmDialog(QDialog):
+    """Preview the saved placement frames and confirm before re-running Gemini.
+
+    The Gemini race-results call only succeeds when the supplied frames show
+    the post-race placement screen — surfacing the carousel up front lets the
+    user verify that.
+    """
+
+    def __init__(
+        self,
+        frame_paths: list[Path],
+        race_number: int,
+        track_name: str | None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Regenerate placements — race {race_number}")
+        self.resize(780, 720)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        title_text = f"Race {race_number}"
+        if track_name:
+            title_text += f"  —  {track_name}"
+        title = QLabel(title_text)
+        title.setStyleSheet(
+            "QLabel { color: #fff; font-size: 14px; font-weight: bold; }"
+        )
+        layout.addWidget(title)
+
+        warning = QLabel(
+            "This will run Gemini against the placement frames captured for"
+            " this race and overwrite any existing placements.\n\n"
+            "The frames must show the post-race results screen (the scrolling"
+            " placement bars). If they show anything else — gameplay, the"
+            " track-select map, the player list — Gemini will return"
+            " garbage or fail."
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet("QLabel { color: #f0c674; }")
+        layout.addWidget(warning)
+
+        carousel = _ImageCarousel(frame_paths, max_width=720)
+        layout.addWidget(carousel, stretch=1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel,
+        )
+        regenerate_btn = buttons.addButton(
+            "Regenerate", QDialogButtonBox.ButtonRole.AcceptRole
+        )
+        regenerate_btn.setDefault(False)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setDefault(True)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
 class _TableImageCard(QFrame):
     """Embeds the generated Lorenzi-style results table image."""
 
@@ -1015,12 +1186,15 @@ class _MatchTimelinePane(QScrollArea):
     raceSelected = Signal(int)  # race_number
     editTableRequested = Signal()
     refetchTableRequested = Signal()
+    refetchPlacementsRequested = Signal(int)  # race_number
 
     def __init__(self, matches_dir: Path = DEFAULT_MATCHES_DIR) -> None:
         super().__init__()
         self._matches_dir = matches_dir
         self._refetch_in_progress = False
         self._table_card: _TableImageCard | None = None
+        self._refetch_placements_race: int | None = None
+        self._race_cards: dict[int, _RaceCard] = {}
         self.setWidgetResizable(True)
         self._inner = QWidget()
         self._layout = QVBoxLayout(self._inner)
@@ -1098,6 +1272,16 @@ class _MatchTimelinePane(QScrollArea):
         if self._table_card is not None:
             self._table_card.set_refetch_in_progress(in_progress)
 
+    def set_refetch_placements_in_progress(
+        self, race_number: int | None,
+    ) -> None:
+        prev = self._refetch_placements_race
+        self._refetch_placements_race = race_number
+        if prev is not None and prev in self._race_cards and prev != race_number:
+            self._race_cards[prev].set_refetch_in_progress(False)
+        if race_number is not None and race_number in self._race_cards:
+            self._race_cards[race_number].set_refetch_in_progress(True)
+
     def set_record(
         self,
         record: MatchRecord,
@@ -1106,6 +1290,9 @@ class _MatchTimelinePane(QScrollArea):
         live_status: str | None = None,
     ) -> None:
         self._clear()
+        self._race_cards = {}
+        match_dir = self._matches_dir / record.match_id
+        api_key_available = bool(load_api_key())
 
         if live:
             races_played = len(record.races)
@@ -1146,8 +1333,22 @@ class _MatchTimelinePane(QScrollArea):
             self._layout.addWidget(note)
         else:
             for race in races:
-                card = _RaceCard(race, record.settings, live=live)
+                card = _RaceCard(
+                    race, record.settings,
+                    live=live,
+                    match_dir=match_dir,
+                    api_key_available=api_key_available,
+                )
                 card.clicked.connect(self.raceSelected.emit)
+                card.refetchPlacementsRequested.connect(
+                    self.refetchPlacementsRequested.emit,
+                )
+                self._race_cards[race.race_number] = card
+                if (
+                    self._refetch_placements_race is not None
+                    and self._refetch_placements_race == race.race_number
+                ):
+                    card.set_refetch_in_progress(True)
                 self._layout.addWidget(card)
 
         if live:
@@ -1644,12 +1845,16 @@ class MatchDetailView(QWidget):
         layout.setSpacing(0)
 
         self._refetch_thread: _RefetchTableThread | None = None
+        self._refetch_placements_thread: _RefetchPlacementsThread | None = None
 
         self._stack = QStackedWidget()
         self._timeline = _MatchTimelinePane(matches_dir=self._matches_dir)
         self._timeline.raceSelected.connect(self._on_race_selected)
         self._timeline.editTableRequested.connect(self._on_edit_table)
         self._timeline.refetchTableRequested.connect(self._on_refetch_table)
+        self._timeline.refetchPlacementsRequested.connect(
+            self._on_refetch_placements,
+        )
         self._race_detail = _RaceDetailView()
         self._race_detail.backRequested.connect(self._show_timeline)
 
@@ -1796,6 +2001,123 @@ class MatchDetailView(QWidget):
         match_dir = self._matches_dir / record.match_id
         self._race_detail.set_race(race, record.settings, match_dir)
         self._stack.setCurrentIndex(1)
+
+    def _on_refetch_placements(self, race_number: int) -> None:
+        record = self._current_record
+        if record is None:
+            return
+        thread = self._refetch_placements_thread
+        if thread is not None and thread.isRunning():
+            return
+        race = next(
+            (r for r in record.races if r.race_number == race_number),
+            None,
+        )
+        if race is None:
+            return
+        match_dir = self._matches_dir / record.match_id
+        race_dir = match_dir / f"race_{race_number:02d}"
+        frame_paths = sorted(race_dir.glob("placement_*.png"))
+        if not frame_paths:
+            QMessageBox.warning(
+                self, "Regenerate failed",
+                f"No placement_*.png frames in {race_dir.name}.",
+            )
+            return
+        if not load_api_key():
+            QMessageBox.warning(
+                self, "Regenerate failed",
+                "No Gemini API key configured. Set one in the Settings tab.",
+            )
+            return
+
+        confirm = _RefetchPlacementsConfirmDialog(
+            frame_paths, race_number, race.track_name, parent=self,
+        )
+        if confirm.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        import cv2
+        frames: list = []
+        for p in frame_paths:
+            img = cv2.imread(str(p))
+            if img is not None:
+                frames.append(img)
+        if not frames:
+            QMessageBox.critical(
+                self, "Regenerate failed",
+                f"Could not read any placement frames in {race_dir.name}.",
+            )
+            return
+
+        match_id = record.match_id
+        thread = _RefetchPlacementsThread(
+            frames, race_number, race_dir, parent=self,
+        )
+        thread.finished.connect(
+            lambda parsed: self._on_refetch_placements_finished(
+                match_id, race_number, parsed,
+            )
+        )
+        self._refetch_placements_thread = thread
+        self._timeline.set_refetch_placements_in_progress(race_number)
+        thread.start()
+
+    def _on_refetch_placements_finished(
+        self, match_id: str, race_number: int, parsed: object,
+    ) -> None:
+        self._timeline.set_refetch_placements_in_progress(None)
+        if not isinstance(parsed, dict):
+            QMessageBox.warning(
+                self, "Regenerate failed",
+                "Gemini did not return a usable response. See "
+                "gemini_results.txt in the race folder for details.",
+            )
+            return
+        match_dir = self._matches_dir / match_id
+        try:
+            record = MatchRecord.load(match_dir)
+        except (OSError, ValueError, KeyError) as exc:
+            QMessageBox.critical(
+                self, "Regenerate failed",
+                f"Could not reload match record:\n{exc}",
+            )
+            return
+        idx = next(
+            (i for i, r in enumerate(record.races) if r.race_number == race_number),
+            None,
+        )
+        if idx is None:
+            QMessageBox.warning(
+                self, "Regenerate failed",
+                f"Race {race_number} no longer exists in this match.",
+            )
+            return
+        try:
+            mode, teams, placements = race_fields_from_gemini(parsed)
+        except (KeyError, TypeError, ValueError) as exc:
+            QMessageBox.warning(
+                self, "Regenerate failed",
+                f"Could not interpret Gemini response:\n{exc}",
+            )
+            return
+        existing = record.races[idx]
+        record.races[idx] = dataclasses.replace(
+            existing,
+            mode=mode or existing.mode,
+            placements=placements,
+            teams=teams if teams else None,
+        )
+        try:
+            record.save(match_dir)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Regenerate failed",
+                f"Could not save match record:\n{exc}",
+            )
+            return
+        self.set_record(record)
+        self.recordEdited.emit(match_id)
 
 
 class MatchHistoryView(QWidget):

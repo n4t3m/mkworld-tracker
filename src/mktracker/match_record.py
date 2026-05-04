@@ -153,6 +153,35 @@ class FinalStandings:
         )
 
 
+def race_fields_from_gemini(
+    gemini: dict[str, Any],
+) -> tuple[str | None, list[TeamGroup], list[PlayerPlacement]]:
+    """Extract ``(mode, teams, placements)`` from a Gemini *race results* response."""
+    mode = gemini.get("mode")
+    teams_list = gemini.get("teams") or []
+    teams: list[TeamGroup] = []
+    all_placements: list[PlayerPlacement] = []
+    for team in teams_list:
+        tg_players: list[PlayerPlacement] = []
+        for p in team.get("players", []):
+            if p.get("place") is None:
+                continue
+            tg_players.append(PlayerPlacement(
+                place=int(p["place"]),
+                name=str(p.get("name", "")),
+            ))
+        teams.append(TeamGroup(
+            name=team.get("name"),
+            tag=team.get("tag"),
+            points=team.get("race_points"),
+            winner=team.get("race_winner"),
+            players=tg_players,
+        ))
+        all_placements.extend(tg_players)
+    all_placements.sort(key=lambda pl: pl.place)
+    return mode, teams, all_placements
+
+
 def final_standings_from_gemini(gemini: dict[str, Any]) -> FinalStandings:
     """Build :class:`FinalStandings` from a Gemini *match results* response."""
     mode = gemini.get("mode")
