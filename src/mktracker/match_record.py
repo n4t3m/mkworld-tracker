@@ -156,7 +156,15 @@ class FinalStandings:
 def race_fields_from_gemini(
     gemini: dict[str, Any],
 ) -> tuple[str | None, list[TeamGroup], list[PlayerPlacement]]:
-    """Extract ``(mode, teams, placements)`` from a Gemini *race results* response."""
+    """Extract ``(mode, teams, placements)`` from a Gemini *race results* response.
+
+    When the total visible player count matches a known MK scoring table
+    (12 or 24), each team's ``points`` is *derived* locally from its
+    placements rather than trusting ``race_points`` from the model —
+    Gemini reads placements reliably but its arithmetic on the +score
+    column is unreliable.  For any other player count Gemini's reported
+    ``race_points`` is used as-is.
+    """
     mode = gemini.get("mode")
     teams_list = gemini.get("teams") or []
     teams: list[TeamGroup] = []
@@ -179,6 +187,18 @@ def race_fields_from_gemini(
         ))
         all_placements.extend(tg_players)
     all_placements.sort(key=lambda pl: pl.place)
+
+    total_players = sum(len(t.players) for t in teams)
+    # Lazy import: team_scoring imports from this module, so a top-level
+    # import would form a cycle.  By the time this function is invoked
+    # both modules are fully loaded.
+    from mktracker.team_scoring import DERIVED_PLAYER_COUNTS, points_for_place
+    if total_players in DERIVED_PLAYER_COUNTS:
+        for team in teams:
+            team.points = sum(
+                points_for_place(p.place, total_players) for p in team.players
+            )
+
     return mode, teams, all_placements
 
 
