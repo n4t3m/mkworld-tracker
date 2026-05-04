@@ -1245,6 +1245,9 @@ class _RaceDetailView(QWidget):
 
         race_dir = match_dir / f"race_{race.race_number:02d}"
         self._layout.addWidget(self._build_single_image_section(
+            "Race Vote", race_dir / "vote.png",
+        ))
+        self._layout.addWidget(self._build_single_image_section(
             "Track Selection", race_dir / "track.png",
         ))
         self._layout.addWidget(self._build_single_image_section(

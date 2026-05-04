@@ -21,6 +21,7 @@ from mktracker.detection.race_finish import RaceFinishDetector
 from mktracker.detection.race_rank import RaceRankDetector
 from mktracker.detection.race_results import RaceResultDetector
 from mktracker.detection.track_select import TrackSelectDetector
+from mktracker.detection.vote_banner import VoteBannerDetector
 from mktracker.debug_config import load_debug_mode
 from mktracker.discord_webhook import (
     EVENT_MATCH_END,
@@ -61,11 +62,15 @@ _DEBUG_RANK_DIR = Path("debug_rank")
 # is enabled. Saved into <race_dir>/debug_placements/.
 _DEBUG_PLACEMENT_CONTEXT = 5
 
-# Cap on the rolling pre-track buffer dumped to <race_dir>/debug_votes/
-# in debug mode.  Detection in WAITING_FOR_TRACK_PICK runs every ~500 ms,
-# so 12 entries covers ~6 s of history — comfortably bracketing the
-# voting-roulette window that precedes the track-name banner.
-_DEBUG_VOTES_BUFFER_MAX = 12
+# Cap on the rolling pre-track buffer.  Detection in
+# WAITING_FOR_TRACK_PICK runs every ~500 ms, so 12 entries covers ~6 s
+# of history — comfortably bracketing the voting-roulette window that
+# precedes the track-name banner.  The buffer is always populated (not
+# just in debug mode) because it backs the "race vote" snapshot feature:
+# on track detection we scan the buffer for the oldest frame containing
+# the yellow "The course has been selected!" banner and save it as
+# ``<race_dir>/vote.png``.
+_PRE_TRACK_BUFFER_MAX = 12
 
 
 def _format_winner_line(standings: FinalStandings) -> str:
@@ -224,6 +229,7 @@ class GameStateMachine:
         self._rank_detector = RaceRankDetector()
         self._result_detector = RaceResultDetector()
         self._match_result_detector = MatchResultDetector()
+        self._vote_banner_detector = VoteBannerDetector()
 
         # Lock protecting _races from concurrent writes by Gemini callbacks.
         self._races_lock = threading.Lock()
@@ -243,11 +249,13 @@ class GameStateMachine:
         self._gemini_match_results: dict | None = None
         self._match_banner_seen_at: float | None = None
 
-        # Debug-mode rolling buffer of (timestamp, frame) tuples seen
-        # during WAITING_FOR_TRACK_PICK.  Used to recover the voting
-        # roulette frame ~1.5s before track detection fires.
+        # Rolling buffer of (timestamp, frame) tuples seen during
+        # WAITING_FOR_TRACK_PICK.  Used to (a) recover the "course has
+        # been selected" banner frame for the per-race "vote" snapshot
+        # (always-on feature), and (b) dump every pre-track frame to
+        # ``debug_votes/`` when debug mode is enabled.
         self._pre_track_buffer: collections.deque[tuple[float, np.ndarray]] = (
-            collections.deque(maxlen=_DEBUG_VOTES_BUFFER_MAX)
+            collections.deque(maxlen=_PRE_TRACK_BUFFER_MAX)
         )
 
         self.debug_mode: bool = load_debug_mode()
@@ -466,15 +474,22 @@ class GameStateMachine:
             self._transition(GameState.WAITING_FOR_TRACK_PICK)
 
     def _handle_racing(self, frame: np.ndarray) -> None:
-        if self.debug_mode:
-            self._pre_track_buffer.append((time.monotonic(), frame.copy()))
+        # Always buffer pre-track frames so we can find the "course has
+        # been selected" banner for the per-race vote snapshot.
+        self._pre_track_buffer.append((time.monotonic(), frame.copy()))
         result = self._track_detector.detect(frame)
         if result is None:
             return
         self._pending_track = result["track_name"]
-        self._save_race_frame(frame, len(self._races) + 1, "track")
+        race_num = len(self._races) + 1
+        self._save_race_frame(frame, race_num, "track")
+        # Dispatch vote-banner search asynchronously — it must not block
+        # the state machine.  Snapshot the buffer here on the main thread
+        # so worker can iterate safely without holding the GIL on a deque
+        # being mutated.
+        self._dispatch_vote_save(race_num, list(self._pre_track_buffer))
         if self.debug_mode:
-            self._save_votes_frames(len(self._races) + 1)
+            self._save_votes_frames(race_num)
         logger.info("Track detected: %s — reading players on next frame", self._pending_track)
         self._transition(GameState.READING_PLAYERS_IN_RACE)
 
@@ -1234,6 +1249,44 @@ class GameStateMachine:
         d = self._race_dir(race_num) / "debug_votes"
         d.mkdir(exist_ok=True)
         return d
+
+    def _dispatch_vote_save(
+        self,
+        race_num: int,
+        buffered: list[tuple[float, np.ndarray]],
+    ) -> None:
+        """Find the oldest buffered frame containing the
+        "course has been selected" yellow banner and save it as
+        ``<race_dir>/vote.png``.
+
+        Runs on a daemon thread so banner detection (HSV mask + row
+        density on up to 12 frames) never blocks the state machine.
+        Silently no-ops if no buffered frame contains the banner — that
+        match's race just won't have a vote snapshot, which the UI
+        handles gracefully.
+        """
+        if not buffered or self._match_dir is None:
+            return
+        race_dir = self._race_dir(race_num)
+
+        def _worker() -> None:
+            try:
+                for _ts, vote_frame in buffered:
+                    if self._vote_banner_detector.is_active(vote_frame):
+                        path = race_dir / "vote.png"
+                        cv2.imwrite(str(path), vote_frame)
+                        logger.info(
+                            "Race %d: saved vote frame to %s", race_num, path,
+                        )
+                        return
+                logger.debug(
+                    "Race %d: no vote banner found in %d buffered frames",
+                    race_num, len(buffered),
+                )
+            except Exception:
+                logger.exception("Vote-frame save failed for race %d", race_num)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _save_votes_frames(self, race_num: int) -> None:
         """Dump the entire rolling pre-track buffer to
