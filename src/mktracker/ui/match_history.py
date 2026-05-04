@@ -791,6 +791,66 @@ class _TableEditDialog(QDialog):
         self.accept()
 
 
+class _RefetchConfirmDialog(QDialog):
+    """Preview ``match_results.png`` and confirm before re-running Gemini.
+
+    Re-fetching only succeeds when the saved frame actually shows the final
+    CONGRATULATIONS!/NICE TRY!/DRAW! standings screen.  Surfacing the image
+    up front lets the user verify that before spending a Gemini call.
+    """
+
+    def __init__(self, results_path: Path, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Regenerate table?")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        warning = QLabel(
+            "This will re-run Gemini against the captured match-results frame"
+            " below and overwrite the current table.\n\n"
+            "The frame must show the final results screen"
+            " (CONGRATULATIONS!/NICE TRY!/DRAW!). If it shows anything else"
+            " — a mid-race screen, the player list, gameplay — Gemini will"
+            " return garbage or fail."
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet("QLabel { color: #f0c674; }")
+        layout.addWidget(warning)
+
+        preview = QLabel()
+        preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview.setStyleSheet(
+            "QLabel { background-color: #101418; border: 1px solid #2a2a2a;"
+            " border-radius: 4px; }"
+        )
+        pixmap = QPixmap(str(results_path))
+        if not pixmap.isNull():
+            scaled = pixmap.scaled(
+                720, 480,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            preview.setPixmap(scaled)
+        else:
+            preview.setText(f"Could not load {results_path.name}")
+            preview.setStyleSheet("QLabel { color: #f88; padding: 24px; }")
+        layout.addWidget(preview, stretch=1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel,
+        )
+        regenerate_btn = buttons.addButton(
+            "Regenerate", QDialogButtonBox.ButtonRole.AcceptRole
+        )
+        regenerate_btn.setDefault(False)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setDefault(True)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
 class _RefetchTableThread(QThread):
     """Re-runs the Gemini match-results call against ``match_results.png``.
 
@@ -1663,6 +1723,11 @@ class MatchDetailView(QWidget):
                 "No Gemini API key configured. Set one in the Settings tab.",
             )
             return
+
+        confirm = _RefetchConfirmDialog(results_path, parent=self)
+        if confirm.exec() != QDialog.DialogCode.Accepted:
+            return
+
         import cv2
         frame = cv2.imread(str(results_path))
         if frame is None:
