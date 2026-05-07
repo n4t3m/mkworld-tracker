@@ -37,16 +37,32 @@ _MATCH_CUTOFF = 0.85
 # Seconds to skip detection after a confirmed match.
 _COOLDOWN_SECONDS = 15.0
 
+# Player-list-panel detector: we sample a vertical strip well inside the left
+# panel, mean-collapse to a 1D row-brightness profile, detrend with a gaussian
+# blur, and look at the autocorrelation peak in the lag range covering one
+# pill row (~50-180 px on a 1080p frame). The proper track-select screen has
+# a clearly periodic pill pattern; voting screens (full-screen world map) and
+# in-race overlays (3D scenery) do not. Real fixtures land at 0.43-0.92 across
+# all layouts (12p/24p, no-team, team-mode); voting and gameplay frames stay
+# under 0.20. 0.30 sits comfortably in the gap.
+_PANEL_STRIP_X1 = 0.05
+_PANEL_STRIP_X2 = 0.30
+_PANEL_DETREND_KSIZE = 51
+_PANEL_PERIOD_MIN_LAG = 40
+_PANEL_PERIOD_MAX_LAG = 180
+_PANEL_AUTOCORR_MIN = 0.30
+
 
 class TrackSelectDetector:
     """Detects the Mario Kart track-selection screen and reads the track name.
 
     The track-name banner can appear anywhere on the right-side map (it
-    follows the selected island), and the player-list panel on the left is
-    not always dark — team-mode matches fill it with bright colored bars,
-    and 24-player matches widen the panel past the old 42% boundary. So we
-    skip the brightness pre-check and rely on the canonical-track-list fuzzy
-    match (with a tight cutoff) as the screen discriminator.
+    follows the selected island), so OCR sparse-scans the right ~60% and
+    fuzzy-matches every line against the canonical track list with a tight
+    cutoff. To reject look-alike screens whose text *also* fuzzy-matches a
+    canonical name (the voting screen has 3-5 candidate banners; the in-race
+    track-name overlay has one), ``has_player_panel`` requires a periodic
+    pill-row pattern in the left panel area as a screen pre-check.
 
     The state machine guards calls to ``detect()`` by game state and applies
     the cooldown after a successful match.
@@ -54,6 +70,43 @@ class TrackSelectDetector:
 
     def __init__(self) -> None:
         self._last_match_time: float = 0.0
+
+    @staticmethod
+    def has_player_panel(frame: np.ndarray) -> bool:
+        """Return True iff the left side has the periodic pill-row pattern.
+
+        Discriminates the proper track-select screen (which always has the
+        player-list panel on the left) from the voting screen (full-screen
+        world map, no panel) and from in-race gameplay frames where the
+        track-name overlay briefly appears (3D scenery, no panel).
+        """
+        h, w = frame.shape[:2]
+        strip = frame[:, int(w * _PANEL_STRIP_X1) : int(w * _PANEL_STRIP_X2)]
+        gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        profile = gray.mean(axis=1)
+
+        # Detrend so we measure the high-freq pill rhythm, not slow lighting
+        # gradients across the panel.
+        smoothed = cv2.GaussianBlur(
+            profile.reshape(-1, 1), (1, _PANEL_DETREND_KSIZE), 0
+        ).flatten()
+        detrended = profile - smoothed
+        detrended -= detrended.mean()
+
+        # Autocorrelation via FFT, normalised to [0, 1] at lag 0.
+        n = len(detrended)
+        if n < _PANEL_PERIOD_MAX_LAG + 1:
+            return False
+        spec = np.fft.fft(detrended, n=2 * n)
+        acorr = np.fft.ifft(spec * np.conj(spec)).real[:n]
+        if acorr[0] <= 0:
+            return False
+        acorr /= acorr[0]
+
+        peak = float(
+            acorr[_PANEL_PERIOD_MIN_LAG : _PANEL_PERIOD_MAX_LAG + 1].max()
+        )
+        return peak >= _PANEL_AUTOCORR_MIN
 
     def read_track_name(self, frame: np.ndarray) -> tuple[str, float] | None:
         """OCR the track-name banner anywhere in the right region.
@@ -104,11 +157,13 @@ class TrackSelectDetector:
         return best_name, best_ratio
 
     def detect(self, frame: np.ndarray) -> dict | None:
-        """Full pipeline: cooldown gate, OCR, fuzzy match.
+        """Full pipeline: cooldown gate, panel pre-check, OCR, fuzzy match.
 
         Returns ``{"track_name": str}`` or ``None``.
         """
         if time.monotonic() - self._last_match_time < _COOLDOWN_SECONDS:
+            return None
+        if not self.has_player_panel(frame):
             return None
         result = self.read_track_name(frame)
         if result is None:
