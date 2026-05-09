@@ -1209,6 +1209,7 @@ class _MissingTableCard(QFrame):
         *,
         results_available: bool,
         api_key_available: bool,
+        final_standings_present: bool = False,
     ) -> None:
         super().__init__()
         self.setFrameShape(QFrame.Shape.StyledPanel)
@@ -1230,16 +1231,21 @@ class _MissingTableCard(QFrame):
         )
         header_row.addWidget(heading)
 
-        status = QLabel("Not Generated")
+        status_text = "Render Failed" if final_standings_present else "Not Generated"
+        status_tip = (
+            "Final standings exist but rendering table.png failed. "
+            "Edit Table to retry by re-saving."
+            if final_standings_present
+            else "Final standings were never captured for this match — "
+            "either the Gemini call failed or the match did not reach "
+            "the CONGRATULATIONS! screen."
+        )
+        status = QLabel(status_text)
         status.setStyleSheet(
             "QLabel { background-color: #6a2a2a; color: #fff; font-weight: bold;"
             " padding: 2px 10px; border-radius: 10px; font-size: 12px; }"
         )
-        status.setToolTip(
-            "Final standings were never captured for this match — "
-            "either the Gemini call failed or the match did not reach "
-            "the CONGRATULATIONS! screen."
-        )
+        status.setToolTip(status_tip)
         header_row.addWidget(status)
         header_row.addStretch()
 
@@ -1271,21 +1277,36 @@ class _MissingTableCard(QFrame):
             header_row.addWidget(self._refetch_btn)
         layout.addLayout(header_row)
 
-        warn = QLabel("⚠ Final standings were not captured for this match.")
+        warn_text = (
+            "⚠ Final standings exist but rendering table.png failed."
+            if final_standings_present
+            else "⚠ Final standings were not captured for this match."
+        )
+        warn = QLabel(warn_text)
         warn.setStyleSheet("QLabel { color: #f0c674; font-weight: bold; }")
         layout.addWidget(warn)
 
-        err_hint = _read_table_error_hint(match_dir)
-        if err_hint:
-            err_label = QLabel(f"Last Gemini error: {err_hint}")
-            err_label.setWordWrap(True)
-            err_label.setStyleSheet(
-                "QLabel { color: #d99; font-family: Consolas, monospace;"
-                " font-size: 12px; }"
-            )
-            layout.addWidget(err_label)
+        # Only surface the Gemini error when we never got final standings —
+        # if standings exist, the failure was in table rendering, not the
+        # Gemini call, so a cached error from an earlier failure would
+        # mislead.
+        if not final_standings_present:
+            err_hint = _read_table_error_hint(match_dir)
+            if err_hint:
+                err_label = QLabel(f"Last Gemini error: {err_hint}")
+                err_label.setWordWrap(True)
+                err_label.setStyleSheet(
+                    "QLabel { color: #d99; font-family: Consolas, monospace;"
+                    " font-size: 12px; }"
+                )
+                layout.addWidget(err_label)
 
-        if results_available and api_key_available:
+        if final_standings_present:
+            hint_text = (
+                "Open Edit Table and Save (without changing anything) "
+                "to re-render table.png from the saved standings."
+            )
+        elif results_available and api_key_available:
             hint_text = (
                 "Click Regenerate Table to retry against the saved "
                 "match_results.png, or Edit Table to enter standings manually."
@@ -1583,6 +1604,26 @@ class _MatchTimelinePane(QScrollArea):
 
         table_path = self._matches_dir / record.match_id / "table.png"
         results_path = self._matches_dir / record.match_id / "match_results.png"
+
+        # Self-heal: if the record has final_standings but table.png is
+        # missing on disk (e.g. _save_match_table hit a transient I/O blip
+        # during the live finalisation while the Discord webhook thread
+        # rendered + posted successfully), regenerate it now from the
+        # already-saved standings. No Gemini call needed.
+        if (
+            not live
+            and record.final_standings is not None
+            and not table_path.exists()
+        ):
+            try:
+                png = generate_table(record)
+                table_path.write_bytes(png)
+            except Exception:
+                logger.exception(
+                    "Failed to lazily render table.png for %s",
+                    record.match_id,
+                )
+
         if record.final_standings is not None and table_path.exists():
             card = _TableImageCard(
                 table_path,
@@ -1600,6 +1641,7 @@ class _MatchTimelinePane(QScrollArea):
                 match_dir=match_dir,
                 results_available=results_path.exists(),
                 api_key_available=api_key_available,
+                final_standings_present=record.final_standings is not None,
             )
             missing.editRequested.connect(self.editTableRequested.emit)
             missing.refetchRequested.connect(self.refetchTableRequested.emit)
