@@ -670,7 +670,29 @@ class _RacePipStrip(QFrame):
                 timeline.add_pip(
                     _PendingRacePip(n), played=False, pulse=is_current,
                 )
-        outer.addWidget(timeline)
+
+        # Wrap the timeline in a horizontal scroll area so a long race count
+        # (e.g. 30+ races at 74px each) can't push the timeline pane's inner
+        # widget wider than the viewport — that previously made every sibling
+        # card (including the results table) get stretched to ~2300px, which
+        # made the table look like it was rendered far off to the right.
+        timeline_scroll = QScrollArea()
+        timeline_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        timeline_scroll.setWidgetResizable(True)
+        timeline_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded,
+        )
+        timeline_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+        )
+        timeline_scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+        )
+        # Pip = 76 tall + 14px top/bottom margin in _PipTimeline = 104.
+        # Reserve another 16 for the horizontal scrollbar when it appears.
+        timeline_scroll.setMinimumHeight(120)
+        timeline_scroll.setWidget(timeline)
+        outer.addWidget(timeline_scroll)
 
 
 class _LiveStatusBanner(QFrame):
@@ -1879,6 +1901,7 @@ class _RaceDetailView(QWidget):
 
     backRequested = Signal()
     editTrackRequested = Signal(int)  # race_number
+    raceSelected = Signal(int)  # race_number — quick-jump from sticky nav
 
     def __init__(self) -> None:
         super().__init__()
@@ -1890,7 +1913,7 @@ class _RaceDetailView(QWidget):
         self._header_host = QWidget()
         self._header_layout = QVBoxLayout(self._header_host)
         self._header_layout.setContentsMargins(12, 12, 12, 0)
-        self._header_layout.setSpacing(0)
+        self._header_layout.setSpacing(6)
         outer.addWidget(self._header_host)
 
         # Scrollable body below it.
@@ -1917,12 +1940,17 @@ class _RaceDetailView(QWidget):
         race: RaceRecord,
         settings: MatchSettingsRecord,
         match_dir: Path,
+        *,
+        all_races: list[RaceRecord] | None = None,
     ) -> None:
         self._clear_layout(self._header_layout)
         self._clear_layout(self._layout)
 
         # Sticky header stays visible while scrolling.
         self._header_layout.addWidget(self._build_header(race))
+
+        if all_races and len(all_races) > 1:
+            self._header_layout.addWidget(self._build_race_nav(race, all_races))
 
         self._layout.addWidget(self._build_gemini_summary(race, settings))
 
@@ -2019,6 +2047,114 @@ class _RaceDetailView(QWidget):
             lambda: self._scroll.verticalScrollBar().setValue(0),
         )
         outer.addWidget(top_btn)
+
+        return frame
+
+    # --- race-nav strip ---
+
+    def _build_race_nav(
+        self, current: RaceRecord, all_races: list[RaceRecord],
+    ) -> QWidget:
+        ordered = sorted(all_races, key=lambda r: r.race_number)
+        numbers = [r.race_number for r in ordered]
+        try:
+            idx = numbers.index(current.race_number)
+        except ValueError:
+            idx = 0
+
+        n_total = len(numbers)
+        prev_n = numbers[(idx - 1) % n_total]  # wraps: race 1 -> last race
+        next_n = numbers[(idx + 1) % n_total]  # wraps: last race -> race 1
+
+        frame = QFrame()
+        frame.setStyleSheet(
+            "QFrame { background-color: #14181f; border: 1px solid #232a33;"
+            " border-radius: 6px; }"
+        )
+        row = QHBoxLayout(frame)
+        row.setContentsMargins(8, 6, 8, 6)
+        row.setSpacing(6)
+
+        nav_btn_style = (
+            "QPushButton { background-color: #2a3b4a; color: #fff; border: none;"
+            " border-radius: 4px; padding: 4px 10px; font-weight: bold; }"
+            " QPushButton:hover { background-color: #35506b; }"
+        )
+        chip_style_other = (
+            "QPushButton { background-color: #1f242c; color: #cdd; border: none;"
+            " border-radius: 14px; font-weight: bold; }"
+            " QPushButton:hover { background-color: #2c3744; color: #fff; }"
+        )
+        chip_style_current = (
+            "QPushButton { background-color: #ffcc33; color: #111; border: none;"
+            " border-radius: 14px; font-weight: bold; }"
+        )
+
+        prev_btn = QPushButton("◀  Prev")
+        prev_btn.setFixedHeight(28)
+        prev_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        prev_btn.setStyleSheet(nav_btn_style)
+        prev_btn.setToolTip(f"Jump to race {prev_n}")
+        prev_btn.clicked.connect(
+            lambda _=False, n=prev_n: self.raceSelected.emit(n)
+        )
+        row.addWidget(prev_btn)
+
+        # Horizontally-scrollable, centered chip strip. With widgetResizable=True
+        # the inner widget fills the viewport when chips fit (so the trailing
+        # stretches expand and centre them); when chips overflow it shrinks to
+        # its minimum size hint and the horizontal scrollbar appears.
+        chip_scroll = QScrollArea()
+        chip_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        chip_scroll.setWidgetResizable(True)
+        chip_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded,
+        )
+        chip_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+        )
+        chip_scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+        )
+        chip_scroll.setMinimumHeight(34)
+
+        chips_holder = QWidget()
+        chips_holder.setStyleSheet("QWidget { background: transparent; }")
+        chips_row = QHBoxLayout(chips_holder)
+        chips_row.setContentsMargins(0, 0, 0, 0)
+        chips_row.setSpacing(6)
+        chips_row.addStretch(1)
+        for race in ordered:
+            is_current = race.race_number == current.race_number
+            chip = QPushButton(str(race.race_number))
+            chip.setFixedSize(28, 28)
+            tip = f"Race {race.race_number}"
+            if race.track_name:
+                tip += f"  ·  {race.track_name}"
+            chip.setToolTip(tip)
+            if is_current:
+                chip.setStyleSheet(chip_style_current)
+                chip.setEnabled(False)
+            else:
+                chip.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                chip.setStyleSheet(chip_style_other)
+                chip.clicked.connect(
+                    lambda _=False, n=race.race_number: self.raceSelected.emit(n)
+                )
+            chips_row.addWidget(chip)
+        chips_row.addStretch(1)
+        chip_scroll.setWidget(chips_holder)
+        row.addWidget(chip_scroll, stretch=1)
+
+        next_btn = QPushButton("Next  ▶")
+        next_btn.setFixedHeight(28)
+        next_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        next_btn.setStyleSheet(nav_btn_style)
+        next_btn.setToolTip(f"Jump to race {next_n}")
+        next_btn.clicked.connect(
+            lambda _=False, n=next_n: self.raceSelected.emit(n)
+        )
+        row.addWidget(next_btn)
 
         return frame
 
@@ -2213,6 +2349,7 @@ class MatchDetailView(QWidget):
         self._race_detail = _RaceDetailView()
         self._race_detail.backRequested.connect(self._show_timeline)
         self._race_detail.editTrackRequested.connect(self._on_edit_track)
+        self._race_detail.raceSelected.connect(self._on_race_selected)
 
         self._stack.addWidget(self._timeline)    # index 0
         self._stack.addWidget(self._race_detail)  # index 1
@@ -2312,7 +2449,9 @@ class MatchDetailView(QWidget):
             )
             return
         self._current_record = fresh
-        self._race_detail.set_race(target, fresh.settings, match_dir)
+        self._race_detail.set_race(
+            target, fresh.settings, match_dir, all_races=fresh.races,
+        )
         self.recordEdited.emit(record.match_id)
 
     def _on_refetch_table(self) -> None:
@@ -2406,7 +2545,9 @@ class MatchDetailView(QWidget):
         if race is None:
             return
         match_dir = self._matches_dir / record.match_id
-        self._race_detail.set_race(race, record.settings, match_dir)
+        self._race_detail.set_race(
+            race, record.settings, match_dir, all_races=record.races,
+        )
         self._stack.setCurrentIndex(1)
 
     def _on_refetch_placements(self, race_number: int) -> None:
