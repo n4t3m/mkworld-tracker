@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QCursor, QGuiApplication, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -36,7 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mktracker.detection.tracks import TRACK_ICONS_DIR, TRACK_IMAGES
+from mktracker.detection.tracks import TRACK_ICONS_DIR, TRACK_IMAGES, TRACK_NAMES
 from mktracker.gemini_client import load_api_key
 from mktracker.gemini_match_results import request_match_results
 from mktracker.gemini_results import request_race_results
@@ -134,11 +135,16 @@ class _RaceCard(QFrame):
         settings: MatchSettingsRecord,
         *,
         live: bool = False,
+        is_in_progress: bool = False,
         match_dir: Path | None = None,
         api_key_available: bool = False,
     ) -> None:
         super().__init__()
         self._live = live
+        # Only meaningful when ``live`` is True: marks the currently-running
+        # race so we can distinguish "still awaiting Gemini" from "Gemini
+        # returned nothing for a finished race".
+        self._is_in_progress = live and is_in_progress
         self._settings = settings
         self._race_number = race.race_number
         self._match_dir = match_dir
@@ -250,16 +256,28 @@ class _RaceCard(QFrame):
         if race.placements:
             inner = self._build_solo_placements(race)
             return self._wrap_with_regenerate(race, inner)
-        if self._live:
+        if self._live and self._is_in_progress:
             note = QLabel("Awaiting placements…")
             note.setStyleSheet("QLabel { color: #c93; font-style: italic; }")
             return note
 
-        # Non-live, no placements: show the message and a regenerate button
-        # when the user has Gemini configured and we have placement frames on
-        # disk to feed back in.
-        note = QLabel("No placements recorded.")
-        note.setStyleSheet("QLabel { color: #666; font-style: italic; }")
+        # Either non-live with no placements, OR a live match where this race
+        # is already past (a newer race exists) and Gemini returned nothing.
+        # In both cases offer a Regenerate button when frames + API key are
+        # available.
+        if self._live:
+            note = QLabel("⚠ Gemini returned no placements")
+            note.setStyleSheet(
+                "QLabel { color: #f0c674; font-weight: bold; }"
+            )
+            note.setToolTip(
+                "This race finished but the Gemini results call did not "
+                "return placements. Click Regenerate to retry against the "
+                "saved placement_*.png frames."
+            )
+        else:
+            note = QLabel("No placements recorded.")
+            note.setStyleSheet("QLabel { color: #666; font-style: italic; }")
         return self._wrap_with_regenerate(race, note, inline=True)
 
     def _wrap_with_regenerate(
@@ -890,6 +908,67 @@ class _TableEditDialog(QDialog):
         self.accept()
 
 
+class _TrackEditDialog(QDialog):
+    """Pick a canonical track name (or type a custom one) for one race.
+
+    Used to correct a misdetected ``track_name`` on a saved race — e.g.
+    when the track-select detector fired on a voting-screen frame and
+    grabbed one of the candidate banners instead of the final selection.
+    """
+
+    def __init__(
+        self,
+        race_number: int,
+        current: str | None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit track — race {race_number}")
+        self.setMinimumWidth(360)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        intro = QLabel(
+            f"Choose the actual track for race {race_number}, or type a"
+            " custom name if it isn't in the list."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("QLabel { color: #aab; }")
+        layout.addWidget(intro)
+
+        self._combo = QComboBox()
+        self._combo.setEditable(True)
+        self._combo.addItem("")
+        for name in TRACK_NAMES:
+            self._combo.addItem(name)
+        if current:
+            idx = self._combo.findText(current)
+            if idx >= 0:
+                self._combo.setCurrentIndex(idx)
+            else:
+                self._combo.setEditText(current)
+        self._combo.setStyleSheet(
+            "QComboBox { background-color: #101418; color: #eee;"
+            " border: 1px solid #2a2a2a; border-radius: 4px;"
+            " padding: 4px 8px; }"
+        )
+        layout.addWidget(self._combo)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_name(self) -> str | None:
+        text = self._combo.currentText().strip()
+        return text or None
+
+
 class _RefetchConfirmDialog(QDialog):
     """Preview ``match_results.png`` and confirm before re-running Gemini.
 
@@ -1084,6 +1163,172 @@ class _RefetchPlacementsConfirmDialog(QDialog):
         layout.addWidget(buttons)
 
 
+def _read_table_error_hint(match_dir: Path) -> str | None:
+    """Return the final exception line from the most recent
+    ``gemini_match_results.txt`` block, or ``None`` if the log is missing,
+    unreadable, or the latest run did not error."""
+    log = match_dir / "gemini_match_results.txt"
+    if not log.exists():
+        return None
+    try:
+        text = log.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    blocks = text.split("--- Prompt ---")
+    if len(blocks) < 2:
+        return None
+    last = blocks[-1]
+    if "--- Error ---" not in last:
+        return None
+    err = last.split("--- Error ---", 1)[1].strip()
+    if not err:
+        return None
+    lines = [ln.strip() for ln in err.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    final = lines[-1]
+    if len(final) > 160:
+        final = final[:160] + "…"
+    return final
+
+
+class _MissingTableCard(QFrame):
+    """Shown when ``final_standings`` is missing on a non-live match.
+
+    Surfaces the failure (with the last Gemini error if available) and
+    offers the same Edit / Regenerate actions as :class:`_TableImageCard`,
+    so users can recover without leaving the detail pane.
+    """
+
+    editRequested = Signal()
+    refetchRequested = Signal()
+
+    def __init__(
+        self,
+        match_dir: Path,
+        *,
+        results_available: bool,
+        api_key_available: bool,
+    ) -> None:
+        super().__init__()
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet(
+            "_MissingTableCard { background-color: #20180f; border: 1px solid #6a4a1a;"
+            " border-radius: 6px; }"
+            " QLabel { color: #ddd; }"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(6)
+
+        header_row = QHBoxLayout()
+        header_row.setSpacing(8)
+        heading = QLabel("Results Table")
+        heading.setStyleSheet(
+            "QLabel { font-size: 15px; font-weight: bold; color: #ace; }"
+        )
+        header_row.addWidget(heading)
+
+        status = QLabel("Not Generated")
+        status.setStyleSheet(
+            "QLabel { background-color: #6a2a2a; color: #fff; font-weight: bold;"
+            " padding: 2px 10px; border-radius: 10px; font-size: 12px; }"
+        )
+        status.setToolTip(
+            "Final standings were never captured for this match — "
+            "either the Gemini call failed or the match did not reach "
+            "the CONGRATULATIONS! screen."
+        )
+        header_row.addWidget(status)
+        header_row.addStretch()
+
+        btn_style = (
+            "QPushButton { background-color: #2a3b4a; color: #fff; border: none;"
+            " border-radius: 4px; padding: 6px 12px; font-weight: bold; }"
+            " QPushButton:hover { background-color: #35506b; }"
+        )
+        edit_btn = QPushButton("Edit Table")
+        edit_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        edit_btn.setStyleSheet(btn_style)
+        edit_btn.setToolTip(
+            "Paste or type final standings in Lorenzi format to "
+            "render table.png manually."
+        )
+        edit_btn.clicked.connect(self.editRequested.emit)
+        header_row.addWidget(edit_btn)
+
+        self._refetch_btn: QPushButton | None = None
+        if results_available and api_key_available:
+            self._refetch_btn = QPushButton("Regenerate Table")
+            self._refetch_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            self._refetch_btn.setStyleSheet(btn_style)
+            self._refetch_btn.setToolTip(
+                "Re-run Gemini against match_results.png and rebuild "
+                "the final standings",
+            )
+            self._refetch_btn.clicked.connect(self.refetchRequested.emit)
+            header_row.addWidget(self._refetch_btn)
+        layout.addLayout(header_row)
+
+        warn = QLabel("⚠ Final standings were not captured for this match.")
+        warn.setStyleSheet("QLabel { color: #f0c674; font-weight: bold; }")
+        layout.addWidget(warn)
+
+        err_hint = _read_table_error_hint(match_dir)
+        if err_hint:
+            err_label = QLabel(f"Last Gemini error: {err_hint}")
+            err_label.setWordWrap(True)
+            err_label.setStyleSheet(
+                "QLabel { color: #d99; font-family: Consolas, monospace;"
+                " font-size: 12px; }"
+            )
+            layout.addWidget(err_label)
+
+        if results_available and api_key_available:
+            hint_text = (
+                "Click Regenerate Table to retry against the saved "
+                "match_results.png, or Edit Table to enter standings manually."
+            )
+        elif results_available and not api_key_available:
+            hint_text = (
+                "match_results.png is saved but no Gemini API key is "
+                "configured — set one in Settings to enable Regenerate, "
+                "or use Edit Table to enter standings manually."
+            )
+        else:
+            hint_text = (
+                "No match_results.png frame was captured, so Regenerate "
+                "is unavailable. Use Edit Table to enter standings manually."
+            )
+        hint = QLabel(hint_text)
+        hint.setWordWrap(True)
+        hint.setStyleSheet("QLabel { color: #aab; }")
+        layout.addWidget(hint)
+
+    def set_refetch_in_progress(self, in_progress: bool) -> None:
+        btn = self._refetch_btn
+        if btn is None:
+            return
+        if in_progress:
+            btn.setEnabled(False)
+            btn.setText("Regenerating…")
+            btn.setStyleSheet(
+                "QPushButton { background-color: #1a1a1a; color: #666; border: none;"
+                " border-radius: 4px; padding: 6px 12px; font-weight: bold; }"
+            )
+            btn.setCursor(QCursor(Qt.CursorShape.ForbiddenCursor))
+        else:
+            btn.setEnabled(True)
+            btn.setText("Regenerate Table")
+            btn.setStyleSheet(
+                "QPushButton { background-color: #2a3b4a; color: #fff; border: none;"
+                " border-radius: 4px; padding: 6px 12px; font-weight: bold; }"
+                " QPushButton:hover { background-color: #35506b; }"
+            )
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+
 class _TableImageCard(QFrame):
     """Embeds the generated Lorenzi-style results table image."""
 
@@ -1224,7 +1469,7 @@ class _MatchTimelinePane(QScrollArea):
         super().__init__()
         self._matches_dir = matches_dir
         self._refetch_in_progress = False
-        self._table_card: _TableImageCard | None = None
+        self._table_card: _TableImageCard | _MissingTableCard | None = None
         self._refetch_placements_race: int | None = None
         self._race_cards: dict[int, _RaceCard] = {}
         self.setWidgetResizable(True)
@@ -1350,6 +1595,18 @@ class _MatchTimelinePane(QScrollArea):
             if self._refetch_in_progress:
                 card.set_refetch_in_progress(True)
             self._layout.addWidget(card)
+        elif not live:
+            missing = _MissingTableCard(
+                match_dir=match_dir,
+                results_available=results_path.exists(),
+                api_key_available=api_key_available,
+            )
+            missing.editRequested.connect(self.editTableRequested.emit)
+            missing.refetchRequested.connect(self.refetchTableRequested.emit)
+            self._table_card = missing
+            if self._refetch_in_progress:
+                missing.set_refetch_in_progress(True)
+            self._layout.addWidget(missing)
         else:
             self._table_card = None
 
@@ -1364,10 +1621,17 @@ class _MatchTimelinePane(QScrollArea):
             note.setStyleSheet("QLabel { color: #666; font-style: italic; padding: 10px; }")
             self._layout.addWidget(note)
         else:
+            # The highest-numbered race in a live match is the one currently
+            # being tracked; earlier races without placements are Gemini
+            # failures, not "still loading".
+            current_race_number = (
+                max((r.race_number for r in races), default=None) if live else None
+            )
             for race in races:
                 card = _RaceCard(
                     race, record.settings,
                     live=live,
+                    is_in_progress=(race.race_number == current_race_number),
                     match_dir=match_dir,
                     api_key_available=api_key_available,
                 )
@@ -1572,6 +1836,7 @@ class _RaceDetailView(QWidget):
     (Gemini summary + debug images)."""
 
     backRequested = Signal()
+    editTrackRequested = Signal(int)  # race_number
 
     def __init__(self) -> None:
         super().__init__()
@@ -1674,6 +1939,22 @@ class _RaceDetailView(QWidget):
             "QLabel { font-size: 18px; font-weight: bold; color: #fff; }"
         )
         outer.addWidget(title, stretch=1)
+
+        edit_track_btn = QPushButton("✎ Edit Track")
+        edit_track_btn.setFixedHeight(32)
+        edit_track_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        edit_track_btn.setToolTip(
+            "Override the detected track name for this race",
+        )
+        edit_track_btn.setStyleSheet(
+            "QPushButton { background-color: #2a3b4a; color: #fff; border: none;"
+            " border-radius: 4px; padding: 6px 12px; font-weight: bold; }"
+            " QPushButton:hover { background-color: #35506b; }"
+        )
+        edit_track_btn.clicked.connect(
+            lambda _=False, n=race.race_number: self.editTrackRequested.emit(n)
+        )
+        outer.addWidget(edit_track_btn)
 
         if race.user_rank is not None:
             badge = QLabel(f"Your rank: {race.user_rank}")
@@ -1889,6 +2170,7 @@ class MatchDetailView(QWidget):
         )
         self._race_detail = _RaceDetailView()
         self._race_detail.backRequested.connect(self._show_timeline)
+        self._race_detail.editTrackRequested.connect(self._on_edit_track)
 
         self._stack.addWidget(self._timeline)    # index 0
         self._stack.addWidget(self._race_detail)  # index 1
@@ -1939,6 +2221,57 @@ class MatchDetailView(QWidget):
                 updated = record
             self.set_record(updated)
             self.recordEdited.emit(record.match_id)
+
+    def _on_edit_track(self, race_number: int) -> None:
+        record = self._current_record
+        if record is None:
+            return
+        race = next(
+            (r for r in record.races if r.race_number == race_number), None,
+        )
+        if race is None:
+            return
+        dialog = _TrackEditDialog(
+            race_number, race.track_name, parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_name = dialog.selected_name()
+        if new_name == race.track_name:
+            return
+
+        # Reload from disk to avoid clobbering writes the live state machine
+        # may have made since this view was last refreshed.
+        match_dir = self._matches_dir / record.match_id
+        try:
+            fresh = MatchRecord.load(match_dir)
+        except (OSError, ValueError, KeyError) as exc:
+            QMessageBox.critical(
+                self, "Edit failed",
+                f"Could not reload match record:\n{exc}",
+            )
+            return
+        target = next(
+            (r for r in fresh.races if r.race_number == race_number), None,
+        )
+        if target is None:
+            QMessageBox.warning(
+                self, "Edit failed",
+                f"Race {race_number} no longer exists in the saved record.",
+            )
+            return
+        target.track_name = new_name
+        try:
+            fresh.save(match_dir)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Edit failed",
+                f"Could not save match record:\n{exc}",
+            )
+            return
+        self._current_record = fresh
+        self._race_detail.set_race(target, fresh.settings, match_dir)
+        self.recordEdited.emit(record.match_id)
 
     def _on_refetch_table(self) -> None:
         record = self._current_record
