@@ -64,6 +64,13 @@ def test_detects_track_name(filename, expected):
         # over the world map. Used to fuzzy-match one of the candidates.
         os.path.join(_NEGATIVE_DIR, "voting_screen.png"),
         os.path.join(_NEGATIVE_DIR, "voting_screen_2.png"),
+        # Voting screen with a volcano-island silhouette in the left strip
+        # whose periodic pattern pushed has_player_panel above its 0.30
+        # threshold (peak 0.315) and OCR'd "Starview Peak" off a candidate
+        # banner. Rejected by the multi-canonical-match check in
+        # ``read_track_name`` — voting screens always show ≥2 distinct
+        # canonical names while track-select shows only the selected one.
+        os.path.join(_NEGATIVE_DIR, "voting_screen_starview_peak.png"),
         # In-race "track name" overlay shown briefly at race start. The OCR
         # would happily read "Salty Salty Speedway" / "Bowser's Castle" /
         # "Sky-High Sundae" off these gameplay frames; the panel pre-check
@@ -71,6 +78,11 @@ def test_detects_track_name(filename, expected):
         os.path.join(_NEGATIVE_DIR, "gameplay_overlay_salty.png"),
         os.path.join(_NEGATIVE_DIR, "gameplay_overlay_bowsers.png"),
         os.path.join(_NEGATIVE_DIR, "gameplay_overlay_skyhigh.png"),
+        # Gameplay-overlay frames that leaked the autocorr panel-check
+        # (peak 0.301 / 0.509) because the scenery had periodic structure.
+        # Rejected by the long-horizontal-edge count check.
+        os.path.join(_NEGATIVE_DIR, "gameplay_overlay_shy_guy_bazaar.png"),
+        os.path.join(_NEGATIVE_DIR, "gameplay_overlay_dk_spaceport.png"),
     ],
 )
 def test_rejects_non_track_select_screens(filename):

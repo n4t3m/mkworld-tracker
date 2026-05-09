@@ -42,15 +42,30 @@ _COOLDOWN_SECONDS = 15.0
 # blur, and look at the autocorrelation peak in the lag range covering one
 # pill row (~50-180 px on a 1080p frame). The proper track-select screen has
 # a clearly periodic pill pattern; voting screens (full-screen world map) and
-# in-race overlays (3D scenery) do not. Real fixtures land at 0.43-0.92 across
-# all layouts (12p/24p, no-team, team-mode); voting and gameplay frames stay
-# under 0.20. 0.30 sits comfortably in the gap.
+# in-race overlays (3D scenery) do not. Real fixtures land at 0.43-0.92, but
+# real in-game frames can dip to ~0.30 (e.g. transition states with a not-
+# yet-fully-rendered panel), so this threshold alone isn't sufficient to
+# reject voting screens whose island scenery happens to be periodic — the
+# multi-canonical-match check in ``read_track_name`` handles that case.
 _PANEL_STRIP_X1 = 0.05
 _PANEL_STRIP_X2 = 0.30
 _PANEL_DETREND_KSIZE = 51
 _PANEL_PERIOD_MIN_LAG = 40
 _PANEL_PERIOD_MAX_LAG = 180
 _PANEL_AUTOCORR_MIN = 0.30
+
+# Secondary check: count rows in the left strip whose horizontal-edge
+# response (Sobel-Y, top-decile threshold) spans ≥40% of the strip width.
+# Player-list pills produce wide flat top/bottom edges that span the panel;
+# 3D gameplay scenery and voting-screen world-map graphics produce shorter,
+# more diagonal edges. Across all 16 positive fixtures this score is 47-98;
+# all 6 negative fixtures (voting + gameplay overlays) score 0-43; the
+# leaked race-4 frame (Shy Guy Bazaar gameplay overlay, peak 0.301) scores
+# 30; the leaked race-8 frame (DK Spaceport gameplay overlay, peak 0.509)
+# scores 1. Threshold 45 sits in the gap.
+_PANEL_LONG_EDGE_PCTILE = 90  # threshold per-pixel: top-decile Sobel-Y
+_PANEL_LONG_EDGE_ROW_FRAC = 0.40  # row counts as "long" if 40%+ pixels are edge
+_PANEL_MIN_LONG_EDGES = 45
 
 
 class TrackSelectDetector:
@@ -79,6 +94,18 @@ class TrackSelectDetector:
         player-list panel on the left) from the voting screen (full-screen
         world map, no panel) and from in-race gameplay frames where the
         track-name overlay briefly appears (3D scenery, no panel).
+
+        Two checks combined:
+
+        1. Autocorrelation peak in the row-brightness profile — pill rows
+           give a strong periodic signal; smooth scenery does not.
+        2. Count of rows whose horizontal Sobel-Y response spans ≥40% of
+           the strip width — pill top/bottom edges produce wide horizontal
+           lines, but 3D scenery edges are shorter and more diagonal.
+
+        The autocorr alone leaks on gameplay frames whose scenery happens
+        to be periodic (race-8 brick-wall corridor scored 0.509); the
+        long-edge count alone is enough to reject those.
         """
         h, w = frame.shape[:2]
         strip = frame[:, int(w * _PANEL_STRIP_X1) : int(w * _PANEL_STRIP_X2)]
@@ -106,14 +133,30 @@ class TrackSelectDetector:
         peak = float(
             acorr[_PANEL_PERIOD_MIN_LAG : _PANEL_PERIOD_MAX_LAG + 1].max()
         )
-        return peak >= _PANEL_AUTOCORR_MIN
+        if peak < _PANEL_AUTOCORR_MIN:
+            return False
+
+        # Long-horizontal-edge count: rejects gameplay overlays whose scenery
+        # has periodic structure but no pill-shaped UI rows.
+        gray8 = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
+        sobel_y = np.abs(cv2.Sobel(gray8, cv2.CV_32F, 0, 1, ksize=3))
+        edge_threshold = float(np.percentile(sobel_y, _PANEL_LONG_EDGE_PCTILE))
+        binary = sobel_y > edge_threshold
+        row_frac = binary.mean(axis=1)
+        long_edges = int((row_frac > _PANEL_LONG_EDGE_ROW_FRAC).sum())
+        return long_edges >= _PANEL_MIN_LONG_EDGES
 
     def read_track_name(self, frame: np.ndarray) -> tuple[str, float] | None:
         """OCR the track-name banner anywhere in the right region.
 
         Returns ``(canonical_name, similarity)`` or ``None``. Tries multiple
         PSM modes and joins adjacent fragments because Tesseract sometimes
-        splits the banner across two lines.
+        splits the banner across two lines. Returns ``None`` if more than one
+        distinct canonical track name is visible in the right region — this
+        rejects the voting screen, which displays 3-5 candidate banners that
+        each fuzzy-match a canonical name (e.g. Choco Mountain + Toad's
+        Factory + Starview Peak), versus the track-select screen which only
+        shows the single selected banner.
         """
         h, w = frame.shape[:2]
         roi = frame[:, int(w * _RIGHT_REGION_X) :]
@@ -140,12 +183,14 @@ class TrackSelectDetector:
 
         best_name: str | None = None
         best_ratio = 0.0
+        matched_names: set[str] = set()
         for cand in candidates:
             matches = difflib.get_close_matches(
                 cand, TRACK_NAMES, n=1, cutoff=_MATCH_CUTOFF
             )
             if not matches:
                 continue
+            matched_names.add(matches[0])
             ratio = difflib.SequenceMatcher(
                 None, cand.lower(), matches[0].lower()
             ).ratio()
@@ -153,6 +198,10 @@ class TrackSelectDetector:
                 best_name, best_ratio = matches[0], ratio
 
         if best_name is None:
+            return None
+        if len(matched_names) >= 2:
+            # Multiple distinct canonical names visible → voting screen, not
+            # track-select. Bail without committing to any one of them.
             return None
         return best_name, best_ratio
 
