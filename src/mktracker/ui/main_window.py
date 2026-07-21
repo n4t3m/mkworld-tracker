@@ -172,6 +172,11 @@ class MainWindow(QMainWindow):
         self._combo.currentIndexChanged.connect(self._on_source_changed)
         toolbar.addWidget(self._combo)
 
+        self._resolution_combo = QComboBox()
+        self._resolution_combo.setMinimumWidth(200)
+        self._resolution_combo.currentIndexChanged.connect(self._on_resolution_changed)
+        toolbar.addWidget(self._resolution_combo)
+
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self._refresh_sources)
         toolbar.addWidget(refresh_btn)
@@ -711,16 +716,39 @@ class MainWindow(QMainWindow):
     def _on_source_changed(self, combo_index: int) -> None:
         if combo_index < 0 or combo_index >= len(self._sources):
             return
+
         index = self._sources[combo_index]["index"]
         ok = self._capture.open(index)
+
+        self._resolution_combo.blockSignals(True)
         if ok:
             self.statusBar().showMessage(
                 f"Opened {self._sources[combo_index]['label']}"
             )
+
+            self._resolution_combo.clear()
+            supported_resolutions = self._capture.get_supported_resolutions()
+
+            for resolution in supported_resolutions:
+                self._resolution_combo.addItem(f'{resolution[0]}x{resolution[1]}', userData=resolution)
+
+            self._resolution_combo.setCurrentIndex(self._resolution_combo.count() - 1)
+
         else:
+            self._resolution_combo.clear()
             self.statusBar().showMessage(
                 f"Failed to open {self._sources[combo_index]['label']}"
             )
+
+        self._resolution_combo.blockSignals(False)
+
+    def _on_resolution_changed(self, combo_index: int) -> None:
+        if combo_index < 0 or combo_index >= len(self._sources):
+            return
+
+        resolution = self._resolution_combo.itemData(combo_index)
+        self._capture._cap.set(cv2.CAP_PROP_FRAME_WIDTH,  resolution[0])
+        self._capture._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, resolution[1])
 
     # ------------------------------------------------------------------
     # Frame update loop
