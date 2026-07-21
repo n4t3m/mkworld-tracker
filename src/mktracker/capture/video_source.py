@@ -5,7 +5,6 @@ import sys
 import cv2
 import numpy as np
 
-
 def _select_capture_backend() -> int:
     if sys.platform.startswith("win"):
         return cv2.CAP_DSHOW
@@ -17,7 +16,6 @@ def _select_capture_backend() -> int:
 
 
 _CAPTURE_BACKEND = _select_capture_backend()
-
 
 def enumerate_sources(max_index: int = 10) -> list[dict]:
     """Probe camera indices and return those that open successfully."""
@@ -44,6 +42,7 @@ class VideoCapture:
         cap = cv2.VideoCapture(index, _CAPTURE_BACKEND)
         if not cap.isOpened():
             return False
+
         self._cap = cap
         self._index = index
         return True
@@ -53,6 +52,28 @@ class VideoCapture:
             self._cap.release()
             self._cap = None
             self._index = None
+
+    def get_supported_resolutions(self) -> list[(int, int)]:
+        common_resolutions = [
+            (640, 480),    # VGA
+            (1280, 720),   # HD
+            (1920, 1080),  # Full HD
+            (2560, 1440),  # QHD
+            (3840, 2160)   # 4K UHD
+        ]
+
+        supported_resolutions = []
+        for width, height in common_resolutions:
+            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH,  width)
+            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+
+            actual_width  = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+            if actual_width == width and actual_height == height:
+                supported_resolutions.append((width, height))
+
+        return supported_resolutions
 
     def read_frame(self) -> np.ndarray | None:
         if not self.is_open:
