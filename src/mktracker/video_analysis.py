@@ -1,7 +1,6 @@
 """Local, cancellable analysis of recorded custom-room sessions."""
 from __future__ import annotations
 
-import difflib
 import re
 from typing import Callable
 
@@ -14,7 +13,7 @@ from mktracker.detection.race_results import RaceResultDetector
 from mktracker.detection.name_consensus import PlacementConsensus
 from mktracker.detection.preview_roster import PreviewRoster
 from mktracker.detection.track_select import TrackSelectDetector
-from mktracker.detection.tracks import TRACK_NAMES
+from mktracker.detection.tracks import course_text_candidates, match_track_name
 from mktracker.video_timeline import VideoRace, VideoTimeline
 
 
@@ -33,16 +32,15 @@ def read_course(frame: np.ndarray) -> str | None:
             key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
             grouped.setdefault(key, []).append((word.strip(), float(data["conf"][i])))
     lines = [" ".join(word for word, conf in words) for words in grouped.values()]
-    candidates = lines + [a + " " + b for a, b in zip(lines, lines[1:])]
+    candidates = course_text_candidates(lines)
     names = set()
     for candidate in candidates:
-        matches = difflib.get_close_matches(candidate.lower(), [n.lower() for n in TRACK_NAMES], n=1, cutoff=.86)
-        if matches:
-            names.add(next(n for n in TRACK_NAMES if n.lower() == matches[0]))
+        match = match_track_name(candidate, cutoff=.86)
+        if match:
+            names.add(match[0])
     if names:
         return names.pop() if len(names) == 1 else None
-    # Preserve readable labels absent from the upstream 30-course list
-    # (e.g. this recording's "SNES Mario Circuit 2" preset).
+    # Preserve readable retro labels absent from the canonical course list.
     labels = [line for line, words in zip(lines, grouped.values())
               if re.match(r"^(?:SNES|N64|GBA|GCN|DS|Wii|3DS)\s", line, re.IGNORECASE)
               and len(words) >= 3 and min(conf for _, conf in words[1:]) >= 75

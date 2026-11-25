@@ -1,6 +1,8 @@
 """Canonical list of Mario Kart track names."""
 
 from pathlib import Path
+import difflib
+import re
 
 TRACK_ICONS_DIR = Path(__file__).resolve().parents[3] / "assets" / "track_icons"
 
@@ -35,7 +37,59 @@ TRACK_NAMES: tuple[str, ...] = (
     "Wario Shipyard",
     "Wario Stadium",
     "Whistlestop Summit",
+    # Ver. 1.8.0 (September 2026).
+    "SNES Mario Circuit 1",
+    "SNES Mario Circuit 2",
+    "SNES Mario Circuit 3",
+    "SNES Ghost Valley 1",
+    "SNES Ghost Valley 2",
+    "SNES Ghost Valley 3",
+    "SNES Choco Island 1",
+    "SNES Choco Island 2",
+    "SNES Vanilla Lake 1",
+    "SNES Koopa Beach 1",
+    # Ver. 1.9.0 (November 2026).
+    "Airship Fortress 2",
+    "Desert Hills 2",
+    "Salty Salty Speedway 2",
+    "DK Pass 2",
+    "Koopa Troopa Beach 2",
+    "Shy Guy Bazaar 2",
+    "Mario Bros. Circuit 2",
+    "Wario Stadium 2",
 )
+
+
+def match_track_name(candidate: str, cutoff: float = .85) -> tuple[str, float] | None:
+    """Match OCR text without changing a course's number or SNES identity."""
+    candidate = " ".join(candidate.split()).casefold()
+    numbers = re.findall(r"\d+", candidate)
+    names = [name for name in TRACK_NAMES
+             if re.findall(r"\d+", name) == numbers
+             and name.startswith("SNES ") == candidate.startswith("snes ")]
+    matches = difflib.get_close_matches(candidate, [n.casefold() for n in names],
+                                        n=1, cutoff=cutoff)
+    if not matches:
+        return None
+    name = next(n for n in names if n.casefold() == matches[0])
+    return name, difflib.SequenceMatcher(None, candidate, matches[0]).ratio()
+
+
+def course_text_candidates(lines: list[str]) -> list[str]:
+    """Rejoin wrapped course banners before matching individual fragments."""
+    merged: list[str] = []
+    for line in lines:
+        if merged:
+            joined = merged[-1] + " " + line
+            match = match_track_name(joined)
+            if match and (match[1] == 1 or line.isdigit()):
+                merged[-1] = joined
+                continue
+        merged.append(line)
+    candidates = list(merged)
+    for a, b in zip(merged, merged[1:]):
+        candidates.extend((a + " " + b, a + b))
+    return candidates
 
 TRACK_IMAGES: dict[str, str] = {
     "Acorn Heights": "MKWorld_Acorn_Heights_Icon.png",

@@ -69,6 +69,12 @@ Each notification is individually configurable from the **Settings** tab. Paste 
 - **Live game state detection**: This program will automatically detect when a match starts and track all information about the race, track selection, placements, etc. No manual interaction from you is needed.
 - **Match settings recognition**: Auto-reads and adapts to the number of teams and race count and gives specialized info based on that.
 - **Track detection**: Automatically recognizes each of the tracks being played.
+
+The course catalog includes all 48 courses through game version 1.9.0: the
+original 30, ten SNES courses from 1.8.0, and eight numbered variants from
+1.9.0. Live detection, video analysis, and the match-history course picker share
+this catalog. Course numbers are preserved during OCR matching. Added courses
+display their names without artwork until dedicated icons are available.
 - **Per-race placements**: Records the full finishing order after every race. This accounts for different team modes.
 - **Final match standings**: Captures the final scores and standings at the end of every match automatically.
 - **Persistent match history**: Every match you play is saved automatically and viewable later in a Match History tab, with a per-race breakdown.

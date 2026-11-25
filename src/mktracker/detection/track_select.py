@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import difflib
 import logging
 import time
 
@@ -8,7 +7,7 @@ import cv2
 import numpy as np
 import pytesseract
 
-from mktracker.detection.tracks import TRACK_NAMES
+from mktracker.detection.tracks import course_text_candidates, match_track_name
 
 logger = logging.getLogger(__name__)
 
@@ -169,33 +168,21 @@ class TrackSelectDetector:
         candidates: list[str] = []
         for psm in _PSM_MODES:
             text = pytesseract.image_to_string(thresh, config=f"--psm {psm}")
-            for line in text.splitlines():
-                line = line.strip()
-                if line:
-                    candidates.append(line)
-
-        # Banner sometimes splits across two lines (e.g. "Wario S" + "hipyard");
-        # try adjacent pairs joined both with and without a space.
-        base = list(candidates)
-        for i in range(len(base) - 1):
-            candidates.append((base[i] + " " + base[i + 1]).strip())
-            candidates.append((base[i] + base[i + 1]).strip())
+            candidates.extend(course_text_candidates(
+                [line.strip() for line in text.splitlines() if line.strip()]
+            ))
 
         best_name: str | None = None
         best_ratio = 0.0
         matched_names: set[str] = set()
         for cand in candidates:
-            matches = difflib.get_close_matches(
-                cand, TRACK_NAMES, n=1, cutoff=_MATCH_CUTOFF
-            )
-            if not matches:
+            match = match_track_name(cand, cutoff=_MATCH_CUTOFF)
+            if match is None:
                 continue
-            matched_names.add(matches[0])
-            ratio = difflib.SequenceMatcher(
-                None, cand.lower(), matches[0].lower()
-            ).ratio()
+            name, ratio = match
+            matched_names.add(name)
             if ratio > best_ratio:
-                best_name, best_ratio = matches[0], ratio
+                best_name, best_ratio = name, ratio
 
         if best_name is None:
             return None
