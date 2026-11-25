@@ -1,5 +1,9 @@
 # MKWorld Tracker
 
+For continuing development on another computer or in a new coding session,
+see [AGENTS.md](AGENTS.md) for current scope, code locations, portable setup,
+test commands, external assets and recording spot checks.
+
 A desktop app that watches your Switch capture card and automatically logs Mario Kart World matches (settings, tracks, players, race placements, and final standings) using a mix of computer vision, OCR, and the Gemini API.
 
 This is intended to be used to track war and mogi data over a long period of time.

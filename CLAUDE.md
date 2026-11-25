@@ -1,5 +1,14 @@
 # MKWorld Tracker — CLAUDE.md
 
+## Current development handoff
+
+Read [AGENTS.md](AGENTS.md) first for the current modified application, portable
+setup and validation. The detailed notes below include legacy detector paths.
+Video Review now has separate playback/timeline state, custom-room row OCR with
+font-assisted name consensus, and local 1st–12th HUD position detection including
+fades. That position reader is not connected to live tracking. The shared course
+catalog contains 48 courses through 1.9.0; Worldwides/Time Trial remain placeholders.
+
 ## Project Overview
 A Python app that watches a capture card's video feed of Mario Kart and automatically detects game state, match settings, track names, player names, and race result placements using computer vision, OCR, and the Gemini LLM API.
 
@@ -37,10 +46,10 @@ src/mktracker/
 │   ├── race_rank.py             # RaceRankDetector: crops rank indicator region for LLM reading
 │   ├── race_results.py          # RaceResultDetector: post-race placement reading (teams & no-teams)
 │   ├── track_select.py          # TrackSelectDetector (screen detection + OCR + fuzzy match)
-│   ├── tracks.py                # Canonical tuple of 30 track names
+│   ├── tracks.py                # Shared catalog of 48 courses through 1.9.0
 │   └── vote_banner.py           # VoteBannerDetector: yellow "The course has been selected!" banner
 └── ui/
-    ├── main_window.py           # MainWindow: top-level QTabWidget with Live View, Match History, and Settings tabs
+    ├── main_window.py           # MainWindow: Live View, Video Review, Match History, Settings
     └── match_history.py         # MatchHistoryView + MatchDetailView: match list + per-race timeline with track icons
 
 scripts/
