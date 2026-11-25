@@ -34,6 +34,33 @@ class VideoCapture:
     def __init__(self) -> None:
         self._cap: cv2.VideoCapture | None = None
         self._index: int | None = None
+        self.file_path: str | None = None
+
+    @property
+    def fps(self) -> float:
+        return (self._cap.get(cv2.CAP_PROP_FPS) or 30.0) if self.is_open else 30.0
+
+    @property
+    def duration(self) -> float:
+        return self._cap.get(cv2.CAP_PROP_FRAME_COUNT) / self.fps if self.is_open and self.file_path else 0.0
+
+    @property
+    def position(self) -> float:
+        return self._cap.get(cv2.CAP_PROP_POS_MSEC) / 1000 if self.is_open else 0.0
+
+    def seek(self, seconds: float) -> None:
+        if self.is_open and self.file_path:
+            self._cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, min(seconds, self.duration)) * 1000)
+
+    def open_file(self, path: str) -> bool:
+        self.close()
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            cap.release()
+            return False
+        self._cap = cap
+        self.file_path = path
+        return True
 
     @property
     def is_open(self) -> bool:
@@ -49,6 +76,7 @@ class VideoCapture:
         return True
 
     def close(self) -> None:
+        self.file_path = None
         if self._cap is not None:
             self._cap.release()
             self._cap = None
@@ -61,3 +89,21 @@ class VideoCapture:
         if not ret:
             return None
         return frame
+
+    @property
+    def next_frame_index(self) -> int:
+        return int(self._cap.get(cv2.CAP_PROP_POS_FRAMES)) if self.is_open else 0
+
+    def read_frame_at(self, seconds: float) -> np.ndarray | None:
+        """Read the frame due on the playback clock, discarding late frames."""
+        if not self.is_open or not self.file_path:
+            return self.read_frame()
+        target = max(0, int(seconds * self.fps))
+        behind = target - self.next_frame_index
+        if behind < 0 or behind > self.fps / 2:
+            self._cap.set(cv2.CAP_PROP_POS_FRAMES, target)
+        else:
+            for _ in range(behind):
+                if not self._cap.grab():
+                    return None
+        return self.read_frame()

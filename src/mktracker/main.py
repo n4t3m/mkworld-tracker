@@ -31,6 +31,10 @@ def _set_windows_app_user_model_id() -> None:
 
 
 def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description="Mario Kart World capture and video tracker")
+    parser.add_argument("video", nargs="?", help="Gameplay video to open for review")
+    args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -53,7 +57,7 @@ def main() -> None:
             "App icon not found at %s — using Qt default", _APP_ICON_PATH,
         )
 
-    window = MainWindow()
+    window = MainWindow(initial_video=args.video)
     window.show()
     sys.exit(app.exec())
 

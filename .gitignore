@@ -12,6 +12,8 @@ build/
 
 # Virtual environments
 .venv/
+.venv-app/
+video_timelines/
 venv/
 env/
 
@@ -39,6 +41,7 @@ src/mktracker/assets/fonts/*.ttf
 # Test data provided externally (not tracked)
 testdata/
 captured_frames/
+analysis/
 
 # Local experiment scripts
 sample_race_results.py
