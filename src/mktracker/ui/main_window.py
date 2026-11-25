@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 from mktracker.capture.video_source import VideoCapture, enumerate_sources
 from mktracker.debug_config import load_debug_mode, save_debug_mode
 from mktracker.detection.match_settings import MatchSettings
+from mktracker.detection.hud_position import HudPositionReader
 from mktracker.discord_webhook import (
     EVENT_MATCH_END,
     EVENT_MATCH_START,
@@ -178,6 +179,7 @@ class MainWindow(QMainWindow):
         self._timeline: VideoTimeline | None = None
         self._analysis_thread: _VideoAnalysisThread | None = None
         self._selected_video_race = 0
+        self._position_reader = HudPositionReader()
 
         self._build_ui()
         if not initial_video:
@@ -342,6 +344,10 @@ class MainWindow(QMainWindow):
         self._review_filename.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(self._review_filename, stretch=1)
         outer.addLayout(toolbar)
+        self._review_position = QLabel("Race position: —")
+        self._review_position.setStyleSheet("font-size: 18px; font-weight: bold; padding: 4px;")
+        self._review_position.setToolTip("Local HUD reading for this video frame. A dash means the position is hidden or uncertain.")
+        outer.addWidget(self._review_position)
         self._review_video_label = QLabel("Open a video to review recorded gameplay")
         self._review_video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._review_video_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
@@ -410,6 +416,7 @@ class MainWindow(QMainWindow):
 
     def open_video(self, path: str) -> bool:
         self._stop_video_analysis()
+        self._review_position.setText("Race position: —")
         if not self._capture.open_file(path):
             self._set_playback_enabled(False)
             self._analysis_progress.hide()
@@ -611,6 +618,7 @@ class MainWindow(QMainWindow):
     def _on_review_mode_changed(self, _text: str = "") -> None:
         analyzing = self._analysis_thread is not None and self._analysis_thread.isRunning()
         custom_room = self._review_mode_combo.currentText() == "Custom Room"
+        self._update_review_position(self._last_frame)
         self._analyze_btn.setEnabled(bool(self._capture.file_path) and custom_room and not analyzing)
         self._refresh_names_btn.setEnabled(bool(self._capture.file_path and self._timeline and self._timeline.races)
                                           and custom_room and not analyzing)
@@ -1187,7 +1195,16 @@ class MainWindow(QMainWindow):
             self._video_time.setText(f"{timestamp(self._capture.position)} / {timestamp(self._capture.duration)}")
 
         self._last_frame = frame
+        self._update_review_position(frame)
         self._paint_frame(frame)
+
+    def _update_review_position(self, frame: np.ndarray | None) -> None:
+        rank = None
+        if frame is not None and self._review_mode_combo.currentText() == "Custom Room":
+            rank = self._position_reader.read(frame)
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(rank, "th")
+        value = f"{rank}{suffix}" if rank is not None else "—"
+        self._review_position.setText(f"Race position: {value}")
 
     def _update_live_frame(self) -> None:
         frame = self._live_capture.read_frame()

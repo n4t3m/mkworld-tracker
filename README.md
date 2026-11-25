@@ -132,6 +132,21 @@ uv run mktracker
 
 ### Recorded-video review
 
+In **Custom Room**, **Race position** above the video reads the current frame's
+HUD locally during playback and after seeking, including while paused. A dash
+means the HUD is hidden or the shape is uncertain; the previous position is
+not carried into menus or other frames. Faded indicators are checked with
+additional low-saturation and brightness masks, with stricter shape agreement
+to distinguish the numeral from its translucent outline and background. This
+also works when seeking directly into a fade, without an earlier solid reading.
+Fully invisible, heavily obscured or ambiguous indicators can still show a dash.
+No API key or full-video rescan is
+needed. This reader currently supports **1st–12th in the single-player,
+full-screen layout** used by the supplied blue/red team recordings. Larger
+rooms, split-screen and other HUD layouts need additional reference footage.
+It is connected only to Video Review, not live tracking, and does not yet save
+a position history to the timeline.
+
 Open the **Video Review** tab, choose **Custom Room**, then **Open Video…** and select an MP4 (or another
 OpenCV-supported video). Analysis starts locally in the background. The video
 opens paused; use **Play/Pause** and the seek bar to review it while analysis
