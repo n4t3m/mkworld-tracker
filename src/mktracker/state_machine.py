@@ -20,6 +20,8 @@ from mktracker.detection.player_reader import PlayerReader
 from mktracker.detection.race_finish import RaceFinishDetector
 from mktracker.detection.race_rank import RaceRankDetector
 from mktracker.detection.race_results import RaceResultDetector
+from mktracker.detection.name_consensus import PlacementConsensus
+from mktracker.detection.preview_roster import PreviewRoster
 from mktracker.detection.track_select import TrackSelectDetector
 from mktracker.detection.vote_banner import VoteBannerDetector
 from mktracker.debug_config import load_debug_mode
@@ -227,6 +229,7 @@ class GameStateMachine:
         self._match_detector = MatchSettingsDetector()
         self._track_detector = TrackSelectDetector()
         self._player_reader = PlayerReader()
+        self._preview_roster = PreviewRoster()
         self._finish_detector = RaceFinishDetector()
         self._rank_detector = RaceRankDetector()
         self._result_detector = RaceResultDetector()
@@ -238,6 +241,8 @@ class GameStateMachine:
 
         self._race_placements: dict[int, str] = {}
         self._race_placement_quality: dict[int, int] = {}
+        self._race_name_votes = PlacementConsensus()
+        self._race_overall_frames = 0
         self._seen_race_results = False
         self._result_frames: list[np.ndarray] = []
         # Debug-mode rolling buffer of frames seen *before* the first
@@ -335,8 +340,11 @@ class GameStateMachine:
         self._current_race = 0
         self._match_completed_at = None
         self._pending_track = None
+        self._preview_roster = PreviewRoster()
         self._race_placements = {}
         self._race_placement_quality = {}
+        self._race_name_votes = PlacementConsensus()
+        self._race_overall_frames = 0
         self._seen_race_results = False
         self._result_frames = []
         self._pre_results_buffer.clear()
@@ -483,6 +491,8 @@ class GameStateMachine:
         if result is None:
             return
         self._pending_track = result["track_name"]
+        self._preview_roster = PreviewRoster()
+        self._preview_roster.add(frame)
         race_num = len(self._races) + 1
         self._save_race_frame(frame, race_num, "track")
         # Dispatch vote-banner search asynchronously — it must not block
@@ -500,10 +510,19 @@ class GameStateMachine:
             self._match_settings is not None
             and self._match_settings.teams != "No Teams"
         )
+        if use_teams:
+            self._preview_roster.add(frame)
+            preview_names = self._preview_roster.names()
+            if len(preview_names) < 3 and time.monotonic() - self._state_entered_at < 1.5:
+                return
+        else:
+            preview_names = []
         player_names = tuple(
             p.name for p in self._player_reader.read_players(
                 frame, teams=use_teams)
         )
+        if preview_names and len(preview_names) >= len(player_names):
+            player_names = tuple(preview_names)
 
         race = RaceInfo(track_name=self._pending_track, players=player_names)
         self._races.append(race)
@@ -531,6 +550,9 @@ class GameStateMachine:
         self._track_detector._last_match_time = time.monotonic()
         self._race_placements = {}
         self._race_placement_quality = {}
+        self._race_name_votes = PlacementConsensus(self._preview_roster.names()
+            or (list(self._races[-1].players) if self._races else []))
+        self._race_overall_frames = 0
         self._seen_race_results = False
         self._result_frames = []
         self._pre_results_buffer.clear()
@@ -654,7 +676,12 @@ class GameStateMachine:
             return
 
         if result["type"] == "race":
+            self._race_overall_frames = 0
             results = result["results"]
+            consensus = "confidences" in result
+            if consensus:
+                self._race_name_votes.add(result, frame_id=hash(frame.tobytes()))
+                results = self._race_name_votes.placements()
             self._seen_race_results = True
             frame_quality = len(results)
             new_count = 0
@@ -667,7 +694,7 @@ class GameStateMachine:
                     self._race_placements[placement] = name
                     self._race_placement_quality[placement] = frame_quality
                     new_count += 1
-                elif frame_quality > prev_quality:
+                elif (consensus and name != self._race_placements[placement]) or frame_quality > prev_quality:
                     # This frame detected more rows overall, so its OCR is
                     # likely more reliable.  Overwrite the earlier value.
                     self._race_placements[placement] = name
@@ -679,6 +706,10 @@ class GameStateMachine:
                 "Race results so far: %d placements", len(self._race_placements),
             )
         elif result["type"] == "overall" and self._seen_race_results:
+            if "confidences" in result:
+                self._race_overall_frames += 1
+                if self._race_overall_frames < 3:
+                    return
             logger.info("Overall standings detected — race results complete")
             self._finalise_race_placements()
             self._transition(self._state_after_race_results())

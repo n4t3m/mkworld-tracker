@@ -82,6 +82,11 @@ class RaceResultDetector:
 
             ``None`` when no result rows are detected.
         """
+        if teams:
+            from mktracker.detection.team_results import _bands, read_team_results
+            colored = read_team_results(frame)
+            if colored is not None or len(_bands(frame)) >= 3:
+                return colored
         h, w = frame.shape[:2]
         x1 = int(w * _ROI_X1)
         x2 = int(w * _ROI_X2)
