@@ -186,6 +186,9 @@ Click an entry once to pause and jump to that moment. Course preview timestamps
 mark the map/player-list screen, not the starting gun. Boundaries are sampled
 every half second. Player-name OCR is a draft and may be incomplete or wrong;
 the result-screen entry lets you inspect the footage directly.
+Name OCR is tuned for a 1920×1080 source. Video Review shows a resolution
+notice for smaller recordings because upscaling a 720p copy cannot restore
+the fine lettering lost during capture or compression.
 
 Selecting a timeline entry also shows that race's detected names in the results
 panel. **Refresh Names** re-reads just the saved race result windows and updates
@@ -194,6 +197,10 @@ playback position. The local team-results reader isolates name and placement
 columns, samples the scrolling table every half second, and combines repeated
 readings. Decorative clan symbols and occasional similar letters can still be
 misread; names remain OCR drafts.
+After a complete scan or **Refresh Names**, names repeated across several
+course previews can resolve clear spelling errors in result rows. The original
+OCR reading remains available in the result tooltip, and uncertain matches
+stay marked for review.
 
 Result comparison samples roughly four frames per second while the table is
 visible. It gives clearer reads more weight, compares close spelling variants,

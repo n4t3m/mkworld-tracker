@@ -45,6 +45,13 @@ class VideoCapture:
         return self._cap.get(cv2.CAP_PROP_FRAME_COUNT) / self.fps if self.is_open and self.file_path else 0.0
 
     @property
+    def resolution(self) -> tuple[int, int]:
+        if not self.is_open:
+            return (0, 0)
+        return (round(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                round(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+
+    @property
     def position(self) -> float:
         return self._cap.get(cv2.CAP_PROP_POS_MSEC) / 1000 if self.is_open else 0.0
 

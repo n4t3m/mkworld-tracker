@@ -431,7 +431,12 @@ class MainWindow(QMainWindow):
             return False
         self._main_tabs.setCurrentWidget(self._video_review_tab)
         self._review_filename.setText(Path(path).name)
-        self._review_filename.setToolTip(str(Path(path).resolve()))
+        width, height = self._capture.resolution
+        self._review_filename.setToolTip(
+            f"{Path(path).resolve()}\n{width}×{height} source"
+            + ("\nName OCR is tuned for 1920×1080; a 1080p recording may read more clearly."
+               if width < 1920 or height < 1080 else "")
+        )
         self._timeline = VideoTimeline.load(path, self._capture.duration)
         self._selected_video_race = 0
         self._seek_slider.setRange(0, round(self._capture.duration * 1000))
@@ -544,7 +549,10 @@ class MainWindow(QMainWindow):
             self._analysis_progress.setRange(0, 0)
             self._analysis_progress.setFormat("Analyzing…")
         state = "Analysis complete" if t.complete else f"Analyzed through {timestamp(t.analyzed_until)} / {timestamp(t.duration)}"
-        self._analysis_status.setText(f"{state} · {len(t.races)} races · Click an entry to review. Course preview times are sampled; OCR results need review.")
+        width, height = self._capture.resolution
+        resolution_note = (f" · {width}×{height} source; name OCR may be less accurate below 1080p"
+                           if width < 1920 or height < 1080 else "")
+        self._analysis_status.setText(f"{state} · {len(t.races)} races{resolution_note} · Click an entry to review. Course preview times are sampled; OCR results need review.")
         for number, race in enumerate(t.races, 1):
             entries = [(race.start, f"Race {number} · {race.track} · Course preview")]
             if race.finish is not None:
@@ -596,6 +604,9 @@ class MainWindow(QMainWindow):
                        if evidence.get('preview_checked') else "") +
                     ("A glyph is ambiguous; the original OCR spelling was retained.\n"
                      if evidence.get('glyph_review') else "") +
+                    (f"Matched across {evidence['session_match']['preview_races']} race previews; "
+                     f"original result read: {evidence['raw_name']}\n"
+                     if evidence.get('session_match') else "") +
                     "Agreement measures consistency between OCR reads, not guaranteed accuracy."
                 )
             self._names_list.addItem(item)

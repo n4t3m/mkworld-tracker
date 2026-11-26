@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from typing import Callable
 
 import cv2
@@ -11,6 +12,7 @@ import pytesseract
 from mktracker.detection.race_finish import RaceFinishDetector
 from mktracker.detection.race_results import RaceResultDetector
 from mktracker.detection.name_consensus import PlacementConsensus
+from mktracker.detection.session_names import reconcile_names
 from mktracker.detection.preview_roster import PreviewRoster
 from mktracker.detection.track_select import TrackSelectDetector
 from mktracker.detection.tracks import course_text_candidates, match_track_name
@@ -38,6 +40,15 @@ def read_course(frame: np.ndarray) -> str | None:
         match = match_track_name(candidate, cutoff=.86)
         if match:
             names.add(match[0])
+        else:
+            # Newer Tesseract can read the small SNES badge as "sues".
+            # Recover it only when the rest is an exact, numbered SNES title.
+            prefix, separator, rest = candidate.partition(" ")
+            if (separator and len(prefix) == 4
+                    and SequenceMatcher(None, prefix.casefold(), "snes").ratio() >= .75):
+                retro = match_track_name("SNES " + rest, cutoff=1)
+                if retro and retro[0].startswith("SNES "):
+                    names.add(retro[0])
     if names:
         return names.pop() if len(names) == 1 else None
     # Preserve readable retro labels absent from the canonical course list.
@@ -157,6 +168,8 @@ def analyze_video(
                 last_progress = t
                 timeline.save()
                 progress(timeline)
+        if timeline.complete:
+            reconcile_names(timeline.races)
         timeline.save()
         progress(timeline)
         return timeline
@@ -252,6 +265,10 @@ def refresh_names(timeline: VideoTimeline, *, progress=lambda timeline: None, ca
                 break
             race.placements = votes.placements()
             race.placement_evidence = votes.evidence()
+            timeline.save()
+            progress(timeline)
+        if not cancelled():
+            reconcile_names(timeline.races)
             timeline.save()
             progress(timeline)
     finally:
