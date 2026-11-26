@@ -40,6 +40,7 @@ def _load(name: str):
         "finish_good_0418_04.png",
         "finish_good_0418_06.png",
         "finish_good_0418_07.png",
+        "finish_good_bazaar.jpg",
     ],
 )
 def test_detects_finish_screen(filename):

@@ -45,7 +45,7 @@ _FINE_STRIP_MIN = 0.15
 _FINE_CONTIGUOUS_REQUIRED = 5
 # The centred FINISH! text never reaches the outermost ROI columns;
 # environment orange (lava, sand) often does.
-_EDGE_STRIP_MAX = 0.10
+_EDGE_STRIP_MAX = 0.15
 
 # The FINISH! text lives in a bounded horizontal band (~2/3 of ROI height).
 # Tall gameplay shapes (gliders, terrain) fill nearly the entire ROI vertically.
