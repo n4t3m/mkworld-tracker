@@ -1,4 +1,4 @@
-"""Tests for MatchResultDetector — no-teams ≤12 player layout."""
+"""Tests for final match standings across 8, 12, and 22–24 players."""
 from __future__ import annotations
 
 import os
@@ -21,14 +21,14 @@ def _load(name: str):
 
 
 # ---------------------------------------------------------------------------
-# True positives — no-teams ≤12 player result screens
+# True positives — no-teams 8-player final match standings
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
     "filename",
     [
-        "nicetryvariant.png",       # NICE TRY!, 8 players, silver cup (player got 7th)
-        "12presultscreen.png",      # CONGRATULATIONS!, 8 players, silver cup (player got 2nd)
+        "match-standings-no-teams-8p-nice-try.png",       # NICE TRY!, 8 players, silver cup (player got 7th)
+        "match-standings-no-teams-8p-silver.png",      # CONGRATULATIONS!, 8 players, silver cup (player got 2nd)
         "20260404_151819.png",      # CONGRATULATIONS!, 8 players, same match as above
     ],
 )
@@ -59,7 +59,7 @@ def test_rejects_gameplay_frame(filename):
 
 
 # ---------------------------------------------------------------------------
-# >12 player result screens — no-teams two-column layout
+# >12 player final match standings — no-teams two-column layout
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
@@ -72,7 +72,7 @@ def test_rejects_gameplay_frame(filename):
         ("20260403_175939.png", 22),  # NICE TRY!, 22 players, score-only right column
     ],
 )
-def test_detects_no_teams_24_result_screen(filename, player_count):
+def test_detects_no_teams_large_match_standings(filename, player_count):
     frame = _load(filename)
     result = _detector.detect(frame, teams="No Teams", player_count=player_count)
     assert result is not None, f"Expected positive detection for {filename}"
@@ -80,7 +80,7 @@ def test_detects_no_teams_24_result_screen(filename, player_count):
 
 
 # ---------------------------------------------------------------------------
-# Two-teams ≤12 player result screens — must fire the two-teams detector
+# Two-teams 12-player final standings — must fire the two-teams detector
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
@@ -142,9 +142,9 @@ def test_two_teams_banner_detected(filename):
     [
         "20260329_131323.png",   # Pure gameplay — golden temple
         "20260329_144018.png",   # Pure gameplay — yellow "1st" badge
-        "12presultscreen.png",   # No-teams result screen — wrong layout
-        "nicetryvariant.png",    # No-teams result screen — wrong layout
-        "20260329_162559.png",   # No-teams 24-player result screen
+        "match-standings-no-teams-8p-silver.png",   # No-teams final match standings — wrong layout
+        "match-standings-no-teams-8p-nice-try.png",    # No-teams final match standings — wrong layout
+        "20260329_162559.png",   # No-teams 24-player final match standings
         # Two-team mid-race overall standings — red/blue score panels are
         # present but the banner stripe at the top is gameplay scenery.
         "bad_twoteams_midrace_standings.png",
@@ -210,13 +210,13 @@ def test_multi_team_banner_detected(filename, teams):
         "20260329_131323.png",   # Pure gameplay — golden temple
         "20260329_144018.png",   # Pure gameplay — yellow "1st" badge
         "bad_gameplay_naples.png",  # Naples brick wall — heavy red coverage
-        "20260329_162559.png",   # No-teams 24-player result screen
+        "20260329_162559.png",   # No-teams 24-player final match standings
         "bad_twoteams_midrace_standings.png",  # Mid-race standings
         "bad_player_list_06.png",
         "bad_player_list_07.png",
         "bad_player_list_12.png",
         "bad_finish_banner_blue_sky.png",
-        "nicetryvariant.png",    # No-teams NICE TRY (different banner background)
+        "match-standings-no-teams-8p-nice-try.png",    # No-teams final NICE TRY banner (different background)
     ],
 )
 @pytest.mark.parametrize("teams", ["Three Teams", "Four Teams"])
