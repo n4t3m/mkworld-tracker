@@ -1,13 +1,13 @@
 """Read colored result rows independently, excluding avatars and scores."""
 from __future__ import annotations
 
-from collections import Counter
 import re
 
 import cv2
 import numpy as np
 import pytesseract
 from mktracker.detection.font_symbols import correct_symbol_words
+from mktracker.detection.result_grid import rank_origin
 
 
 def _bands(frame: np.ndarray) -> list[tuple[int, int]]:
@@ -123,10 +123,10 @@ def read_team_results(frame: np.ndarray) -> dict | None:
     # same row grid. A conflicting reading is discarded, never propagated.
     step = float(np.median([b - a for a, b in bands])) + h * .003
     indices = [round((a - bands[0][0]) / step) for a, b in bands]
-    anchors = Counter(rank - index for rank, index in zip(parsed, indices) if rank is not None)
-    if not anchors:
+    origin = rank_origin(list(zip(indices, parsed)))
+    if origin is None:
         return None
-    first, support = anchors.most_common(1)[0]
+    first, support = origin
     results = []
     confidences = {}
     glyph_reviews = {}

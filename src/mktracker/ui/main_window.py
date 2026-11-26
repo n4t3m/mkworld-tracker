@@ -596,6 +596,19 @@ class MainWindow(QMainWindow):
                 if self._game_font_family:
                     item.setFont(QFont(self._game_font_family, self._names_list.font().pointSize()))
             if evidence:
+                session_match = evidence.get("session_match") or {}
+                if "preview_races" in session_match:
+                    session_note = (f"Matched across {session_match['preview_races']} race previews; "
+                                    f"original result read: {evidence.get('raw_name', name)}\n")
+                elif "result_races" in session_match:
+                    session_note = (f"Matched across {session_match['result_races']} race results; "
+                                    f"original result read: {evidence.get('raw_name', name)}\n")
+                elif "highlighted_races" in session_match:
+                    session_note = (f"Matched the highlighted player in "
+                                    f"{session_match['highlighted_races']} races; "
+                                    f"original result read: {evidence.get('raw_name', name)}\n")
+                else:
+                    session_note = ""
                 item.setToolTip(
                     f"Read across {evidence.get('frames', 0)} frames.\n"
                     f"Identity agreement: {evidence.get('agreement', 0):.0%}.\n"
@@ -604,9 +617,7 @@ class MainWindow(QMainWindow):
                        if evidence.get('preview_checked') else "") +
                     ("A glyph is ambiguous; the original OCR spelling was retained.\n"
                      if evidence.get('glyph_review') else "") +
-                    (f"Matched across {evidence['session_match']['preview_races']} race previews; "
-                     f"original result read: {evidence['raw_name']}\n"
-                     if evidence.get('session_match') else "") +
+                    session_note +
                     "Agreement measures consistency between OCR reads, not guaranteed accuracy."
                 )
             self._names_list.addItem(item)

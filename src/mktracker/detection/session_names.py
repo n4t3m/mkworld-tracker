@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import Counter
 from difflib import SequenceMatcher
+from itertools import permutations
 import unicodedata
 
 
@@ -107,4 +108,262 @@ def reconcile_names(races) -> int:
                                              "preview_races": support}
                 evidence["status"] = "review"
                 changes += 1
+    if sum(len(race.placements) >= 20 for race in races) < 4:
+        return changes
+    # The 24-player layout often has no readable course-preview roster.
+    # A spelling independently selected in several races can still settle a
+    # noisy row when that exact spelling was also read as an alternative at
+    # the same rank. Keep these corrections marked for review.
+    support = Counter(name for race in races for name in
+                      {name for _, name in race.placements})
+    for race in races:
+        present = {name for _, name in race.placements}
+        for rank, displayed in race.placements:
+            evidence = race.placement_evidence.get(str(rank), {})
+            if evidence.get("status") != "review" or support[displayed] > 3:
+                continue
+            options = [name for name in set(evidence.get("alternatives", []))
+                       if support[name] >= 4 and name not in present
+                       and _similar(_key(displayed), _key(name)) >= .4]
+            if len(options) != 1:
+                continue
+            candidate = options[0]
+            for row in race.placements:
+                if row[0] == rank:
+                    row[1] = candidate
+                    break
+            evidence.setdefault("raw_name", displayed)
+            evidence["session_match"] = {"name": candidate,
+                                         "result_races": support[candidate]}
+            present.add(candidate)
+            changes += 1
+    support = Counter(name for race in races for name in
+                      {name for _, name in race.placements})
+    stable: dict[str, tuple[str, int]] = {}
+    for name, count in support.items():
+        key = _key(name)
+        if count >= 4 and len(key) >= 4:
+            if key not in stable or count > stable[key][1]:
+                stable[key] = (name, count)
+    for race in races:
+        present = Counter(_key(name) for _, name in race.placements)
+        for rank, displayed in race.placements:
+            key = _key(displayed)
+            if support[displayed] > 3 or len(key) < 4:
+                continue
+            digits = "".join(c for c in key if c.isdecimal())
+            scores = sorted(((_similar(key, candidate_key), name, count)
+                             for candidate_key, (name, count) in stable.items()
+                             if (not present[candidate_key] or
+                                 (candidate_key == key and present[candidate_key] == 1))
+                             and "".join(c for c in candidate_key if c.isdecimal()) == digits),
+                            reverse=True)
+            if not scores:
+                continue
+            threshold = .88 if len(_key(scores[0][1])) <= 4 else .82
+            if scores[0][0] < threshold or (len(scores) > 1 and
+                                                     scores[0][0] - scores[1][0] < .15):
+                continue
+            score, candidate, count = scores[0]
+            for row in race.placements:
+                if row[0] == rank:
+                    row[1] = candidate
+                    break
+            evidence = race.placement_evidence.setdefault(str(rank), {})
+            evidence.setdefault("raw_name", displayed)
+            evidence["session_match"] = {"name": candidate,
+                                         "similarity": round(score, 3),
+                                         "result_races": count}
+            evidence["status"] = "review"
+            present[key] -= 1
+            present[_key(candidate)] += 1
+            changes += 1
+    # A complete room normally repeats its roster. When exactly one common
+    # identity is absent from a race, a same-rank OCR alternative can recover
+    # it even if the winning per-frame spelling was unrelated (a scrolling
+    # row can briefly contaminate a crop). Require a clear margin over every
+    # other unresolved row, and keep the assignment for review.
+    identity_support: dict[str, tuple[str, int]] = {}
+    for name, count in support.items():
+        key = _key(name)
+        if count >= 4 and (key not in identity_support or
+                           count > identity_support[key][1]):
+            identity_support[key] = (name, count)
+    stable_keys = set(identity_support)
+    if len(stable_keys) >= 20:
+        for race in races:
+            if len(race.placements) != 24:
+                continue
+            missing = stable_keys - {_key(name) for _, name in race.placements}
+            if len(missing) != 1:
+                continue
+            target = missing.pop()
+            target_digits = "".join(c for c in target if c.isdecimal())
+            ranked = []
+            for rank, displayed in race.placements:
+                if _key(displayed) in stable_keys:
+                    continue
+                evidence = race.placement_evidence.get(str(rank), {})
+                alternatives = evidence.get("alternatives", [])
+                score = max((_similar(_key(name), target) for name in alternatives
+                             if "".join(c for c in _key(name) if c.isdecimal()) == target_digits),
+                            default=0)
+                ranked.append((score, rank, displayed))
+            ranked.sort(reverse=True)
+            if not ranked or ranked[0][0] < .75 or (len(ranked) > 1 and
+                                                    ranked[0][0] - ranked[1][0] < .15):
+                continue
+            score, rank, displayed = ranked[0]
+            candidate, count = identity_support[target]
+            for row in race.placements:
+                if row[0] == rank:
+                    row[1] = candidate
+                    break
+            evidence = race.placement_evidence.setdefault(str(rank), {})
+            evidence.setdefault("raw_name", displayed)
+            evidence["session_match"] = {"name": candidate,
+                                         "similarity": round(score, 3),
+                                         "result_races": count}
+            evidence["status"] = "review"
+            changes += 1
+    highlighted = [(race, race.highlighted_rank) for race in races
+                   if race.highlighted_rank is not None
+                   and race.highlighted_rank in dict(race.placements)]
+    if len(highlighted) >= 4:
+        digit_reads: dict[str, set[int]] = {}
+        for index, (race, rank) in enumerate(highlighted):
+            selected = dict(race.placements)[rank]
+            evidence = race.placement_evidence.get(str(rank), {})
+            for name in {selected, *evidence.get("alternatives", [])}:
+                if (len(name) >= 4 and name[0].isalpha()
+                        and all(c.isascii() and c.isalnum() for c in name)
+                        and any(c.isdecimal() for c in name)):
+                    digit_reads.setdefault(name, set()).add(index)
+        ranked_digits = sorted(((len(seen), name) for name, seen in digit_reads.items()),
+                               reverse=True)
+        if (ranked_digits and ranked_digits[0][0] >= 2
+                and (len(ranked_digits) == 1 or ranked_digits[0][0] > ranked_digits[1][0])):
+            support_count, candidate = ranked_digits[0]
+            candidate_key = _key(candidate)
+            for race, rank in highlighted:
+                displayed = dict(race.placements)[rank]
+                if displayed == candidate or candidate_key in {
+                        _key(name) for other_rank, name in race.placements if other_rank != rank}:
+                    continue
+                evidence = race.placement_evidence.setdefault(str(rank), {})
+                if (_similar(_key(displayed), candidate_key) < .25
+                        and candidate not in evidence.get("alternatives", [])):
+                    continue
+                for row in race.placements:
+                    if row[0] == rank:
+                        row[1] = candidate
+                        break
+                evidence.setdefault("raw_name", displayed)
+                evidence["session_match"] = {"name": candidate,
+                                             "highlighted_races": support_count}
+                evidence["status"] = "review"
+                changes += 1
+    complete_support = Counter(name for race in races for name in
+                               {name for _, name in race.placements})
+    complete_roster: dict[str, tuple[str, int]] = {}
+    for name, count in complete_support.items():
+        key = _key(name)
+        if count >= 4 and (key not in complete_roster or
+                           count > complete_roster[key][1]):
+            complete_roster[key] = (name, count)
+    if len(complete_roster) == 24:
+        for race in races:
+            if len(race.placements) != 24:
+                continue
+            present = {_key(name) for _, name in race.placements}
+            missing = sorted(set(complete_roster) - present)
+            outliers = [(rank, name) for rank, name in race.placements
+                        if _key(name) not in complete_roster]
+            if not 1 <= len(missing) <= 3 or len(outliers) != len(missing):
+                continue
+            proposals = []
+            for assignment in permutations(missing):
+                scores = []
+                for (rank, displayed), target in zip(outliers, assignment):
+                    alternatives = race.placement_evidence.get(str(rank), {}).get(
+                        "alternatives", [])
+                    scores.append(max(_similar(_key(name), target)
+                                      for name in [displayed, *alternatives]))
+                proposals.append((sum(scores), min(scores), assignment, scores))
+            proposals.sort(reverse=True)
+            total, weakest, assignment, scores = proposals[0]
+            if weakest < .4 or (len(proposals) > 1 and total - proposals[1][0] < .15):
+                continue
+            for (rank, displayed), target, score in zip(outliers, assignment, scores):
+                candidate, count = complete_roster[target]
+                for row in race.placements:
+                    if row[0] == rank:
+                        row[1] = candidate
+                        break
+                evidence = race.placement_evidence.setdefault(str(rank), {})
+                evidence.setdefault("raw_name", displayed)
+                evidence["session_match"] = {"name": candidate,
+                                             "similarity": round(score, 3),
+                                             "result_races": count}
+                evidence["status"] = "review"
+                changes += 1
+    # Short names can have a convincing letter-only OCR consensus even when
+    # the same digit was independently read in several races (Li4z/Lidz).
+    # Use those repeated alternatives only for the matching roster identity.
+    digit_evidence: dict[str, dict[str, set[int]]] = {}
+    for race_index, race in enumerate(races):
+        for rank, displayed in race.placements:
+            source = _key(displayed)
+            if len(source) != 4 or any(c.isdecimal() for c in source):
+                continue
+            evidence = race.placement_evidence.get(str(rank), {})
+            for alternative in evidence.get("alternatives", []):
+                candidate = _key(alternative)
+                if (len(candidate) == 4 and candidate.isascii()
+                        and candidate[:2] == source[:2]
+                        and candidate[-1] == source[-1]
+                        and any(c.isdecimal() for c in candidate)):
+                    digit_evidence.setdefault(source, {}).setdefault(
+                        candidate, set()).add(race_index)
+    digit_corrections = {}
+    for source, candidates in digit_evidence.items():
+        supported = [candidate for candidate, seen in candidates.items()
+                     if len(seen) >= 3]
+        if len(supported) == 1:
+            digit_corrections[source] = supported[0]
+    digit_spellings = {}
+    for candidate in digit_corrections.values():
+        observed = Counter(name for race in races
+                           for rank, _ in race.placements
+                           for name in race.placement_evidence.get(
+                               str(rank), {}).get("alternatives", [])
+                           if _key(name) == candidate and name.isascii()
+                           and name.isalnum())
+        digit_spellings[candidate] = max(
+            observed, key=lambda name: (observed[name], name[0].isupper()),
+            default=candidate)
+    for race in races:
+        present = {_key(name) for _, name in race.placements}
+        for rank, displayed in race.placements:
+            candidate = digit_corrections.get(_key(displayed))
+            if candidate is None or candidate in present:
+                continue
+            evidence = race.placement_evidence.setdefault(str(rank), {})
+            spelling = digit_spellings[candidate]
+            for row in race.placements:
+                if row[0] == rank:
+                    row[1] = spelling
+                    break
+            evidence.setdefault("raw_name", displayed)
+            evidence["session_match"] = {"name": spelling,
+                                         "digit_races": len(digit_evidence[_key(displayed)][candidate])}
+            evidence["status"] = "review"
+            present.add(candidate)
+            changes += 1
+    final_support = Counter(name for race in races for name in
+                            {name for _, name in race.placements})
+    for race in races:
+        for rank, name in race.placements:
+            if final_support[name] < 4:
+                race.placement_evidence.setdefault(str(rank), {})["status"] = "review"
     return changes

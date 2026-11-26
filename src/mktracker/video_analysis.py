@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from difflib import SequenceMatcher
 from typing import Callable
 
@@ -11,6 +12,7 @@ import pytesseract
 
 from mktracker.detection.race_finish import RaceFinishDetector
 from mktracker.detection.race_results import RaceResultDetector
+from mktracker.detection.dark_results import has_dark_bar_contrast
 from mktracker.detection.name_consensus import PlacementConsensus
 from mktracker.detection.session_names import reconcile_names
 from mktracker.detection.preview_roster import PreviewRoster
@@ -62,7 +64,7 @@ def read_course(frame: np.ndarray) -> str | None:
 
 
 def has_result_table(frame: np.ndarray) -> bool:
-    """Recognize several broad red/blue result rows after a finish."""
+    """Recognize colored tables and dark translucent result tables."""
     h, w = frame.shape[:2]
     hsv = cv2.cvtColor(frame[:, int(w * .59):int(w * .99)], cv2.COLOR_BGR2HSV)
     hue, sat, val = cv2.split(hsv)
@@ -70,7 +72,28 @@ def has_result_table(frame: np.ndarray) -> bool:
     rows = mask.mean(axis=1) > .65
     transitions = np.diff(np.r_[False, rows, False].astype(int))
     starts, ends = np.where(transitions == 1)[0], np.where(transitions == -1)[0]
-    return int(((ends - starts >= h * .012) & (ends - starts <= h * .10)).sum()) >= 4
+    if int(((ends - starts >= h * .012) & (ends - starts <= h * .10)).sum()) >= 4:
+        return True
+    # Dark translucent overlays lack team-colored bars. Require a fuller
+    # grid of +point labels so the sparse
+    # finish animation (which can pass has_race_results alone) stays excluded.
+    detector = RaceResultDetector()
+    plus_starts = detector._plus_cluster_starts(frame)
+    grid_rows = detector._plus_clusters_on_grid(plus_starts, h)
+    if grid_rows >= 4:
+        if not has_dark_bar_contrast(frame):
+            return False
+        # During the scroll only a few lower ranks are visible. Confirm those
+        # with parsed placements; the finish animation has spurious + clusters
+        # but no coherent result rows.
+        result = detector.detect(frame, teams=True)
+        if not result or result["type"] != "race":
+            return False
+        ranks = [rank for rank, _ in result["results"] if 1 <= rank <= 24]
+        return (len(set(ranks)) >= 5 or
+                (len(set(ranks)) >= 3 and min(ranks) >= 8
+                 and max(ranks) - min(ranks) >= 2))
+    return False
 
 
 def analyze_video(
@@ -94,6 +117,7 @@ def analyze_video(
     last_progress = -100.0
     current: VideoRace | None = None
     name_votes = PlacementConsensus()
+    highlighted_votes: Counter[int] = Counter()
     results_done = False
     overall_streak = 0
     preview_roster = PreviewRoster()
@@ -145,6 +169,7 @@ def analyze_video(
                         timeline.races.append(current)
                     current.finish = t
                     name_votes = PlacementConsensus(current.preview_players)
+                    highlighted_votes = Counter()
                     results_done = False
                     overall_streak = 0
                     timeline.save()
@@ -159,6 +184,11 @@ def analyze_video(
                             current.results = t
                         overall_streak = 0
                         name_votes.add(result, frame_id=hash(frame.tobytes()))
+                        if result.get("highlighted_rank_source") in ("grid", "ocr_confident"):
+                            highlighted_votes[result["highlighted_rank"]] += 1
+                            best_rank, best_count = highlighted_votes.most_common(1)[0]
+                            if best_count >= 2 and best_count / highlighted_votes.total() >= .6:
+                                current.highlighted_rank = best_rank
                         current.placements = name_votes.placements()
                         current.placement_evidence = name_votes.evidence()
                     elif result and result.get("type") == "overall" and current.placements:
@@ -242,8 +272,11 @@ def refresh_names(timeline: VideoTimeline, *, progress=lambda timeline: None, ca
                         preview_roster.add(preview_frame)
             race.preview_players = preview_roster.names()
             votes = PlacementConsensus(race.preview_players)
+            highlighted_votes: Counter[int] = Counter()
             seen_race = False
             overall_streak = 0
+            race.results = None
+            race.highlighted_rank = None
             for t, frame in _sample_window(cap, race.finish + 5, min(race.finish + 23, timeline.duration), cancelled=cancelled):
                 if cancelled():
                     break
@@ -254,9 +287,13 @@ def refresh_names(timeline: VideoTimeline, *, progress=lambda timeline: None, ca
                 if not result:
                     continue
                 if result["type"] == "race":
+                    if race.results is None:
+                        race.results = t
                     seen_race = True
                     overall_streak = 0
                     votes.add(result, frame_id=hash(frame.tobytes()))
+                    if result.get("highlighted_rank_source") in ("grid", "ocr_confident"):
+                        highlighted_votes[result["highlighted_rank"]] += 1
                 elif seen_race and result["type"] == "overall":
                     overall_streak += 1
                     if overall_streak >= 3:
@@ -265,6 +302,10 @@ def refresh_names(timeline: VideoTimeline, *, progress=lambda timeline: None, ca
                 break
             race.placements = votes.placements()
             race.placement_evidence = votes.evidence()
+            if highlighted_votes:
+                rank, count = highlighted_votes.most_common(1)[0]
+                if count >= 2 and count / highlighted_votes.total() >= .6:
+                    race.highlighted_rank = rank
             timeline.save()
             progress(timeline)
         if not cancelled():

@@ -23,6 +23,7 @@ class VideoRace:
     review_note: str = ""
     placement_evidence: dict[str, dict] = field(default_factory=dict)
     preview_players: list[str] = field(default_factory=list)
+    highlighted_rank: int | None = None
 
 
 @dataclass

@@ -157,6 +157,74 @@ def test_background_below_table_does_not_create_thirteenth_place():
     assert all(rank <= 12 for rank, name in result["results"])
 
 
+def test_dark_24_player_result_grid_reads_scrolled_lower_half():
+    frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "video_analysis" /
+                           "race-results-dark-24p-bottom.jpg"))
+    result = RaceResultDetector().detect(frame, teams=True)
+    assert result["type"] == "race"
+    assert [rank for rank, _ in result["results"]] == list(range(13, 25))
+    names = dict(result["results"])
+    assert names[19] == "BippaXD"
+    assert names[24] == "BIKZO"
+
+
+def test_dark_24_player_grid_keeps_rows_with_missed_plus_labels():
+    frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "video_analysis" /
+                           "race-results-dark-24p-highlight.png"))
+    result = RaceResultDetector().detect(frame, teams=True)
+    assert result["type"] == "race"
+    assert 23 in dict(result["results"])
+
+
+def test_dark_24_player_highlighted_rank_is_read():
+    frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "video_analysis" /
+                           "race-results-dark-24p-highlighted-rank.jpg"))
+    result = RaceResultDetector().detect(frame, teams=True)
+    assert result["type"] == "race"
+    assert result["highlighted_rank"] == 3
+    assert len(dict(result["results"])[3]) >= 2
+
+
+def test_dark_grid_corrects_misread_highlighted_digit():
+    frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "video_analysis" /
+                           "race-results-dark-24p-highlighted-rank2.jpg"))
+    result = RaceResultDetector().detect(frame, teams=True)
+    assert result["highlighted_rank"] == 2
+    assert result["highlighted_rank_source"] == "grid"
+
+
+def test_pinned_highlight_keeps_confident_rank_when_grid_scrolls():
+    frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "video_analysis" /
+                           "race-results-dark-24p-pinned-highlight.jpg"))
+    result = RaceResultDetector().detect(frame, teams=True)
+    assert result["highlighted_rank"] == 14
+    assert result["highlighted_rank_source"] == "ocr_confident"
+
+
+def test_dark_partial_table_keeps_legacy_tail_read():
+    frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "video_analysis" /
+                           "race-results-dark-24p-partial.jpg"))
+    result = RaceResultDetector().detect(frame, teams=True)
+    assert dict(result["results"])[24] == "nerune"
+
+
+def test_dark_icon_overlap_keeps_short_name():
+    frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "video_analysis" /
+                           "race-results-dark-24p-icon.jpg"))
+    result = RaceResultDetector().detect(frame, teams=True)
+    assert 19 in dict(result["results"])
+
+
+def test_dark_short_name_recovers_from_compression_edge():
+    from mktracker.detection.font_symbols import configured_font_path
+    if not Path(configured_font_path()).is_file():
+        pytest.skip("Optional game font is not configured")
+    frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "video_analysis" /
+                           "race-results-dark-24p-short-symbol.png"))
+    result = RaceResultDetector().detect(frame, teams=True)
+    assert dict(result["results"])[3] == "K4I"
+
+
 def test_preview_reader_ignores_obscuring_voice_chat_labels():
     from mktracker.detection.preview_roster import read_preview_names
     frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "video_analysis" / "preset-course.png"))

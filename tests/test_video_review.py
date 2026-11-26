@@ -120,7 +120,11 @@ def test_course_banner_excludes_previous_course_in_free_roam():
     assert read_course(frame("previous-course.jpg")) is None
     assert read_course(frame("preset-course.png")) == "SNES Mario Circuit 2"
     assert has_result_table(frame("result-table.jpg"))
+    assert has_result_table(frame("race-results-dark-24p.jpg"))
+    assert has_result_table(frame("race-results-dark-24p-partial.jpg"))
+    assert has_result_table(frame("race-results-dark-24p-tail.jpg"))
     assert not has_result_table(frame("result-animation.jpg"))
+    assert not has_result_table(frame("ghost-valley-false-results.jpg"))
     assert not has_result_table(frame("previous-course.jpg"))
 
 

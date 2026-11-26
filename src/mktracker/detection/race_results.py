@@ -14,6 +14,10 @@ Two preprocessing paths are supported:
 * **Teams mode** — red / blue opaque bars where the text takes on the bar
   colour.  A Gaussian-blur + Otsu on the HSV *V* channel is used for names,
   and an adaptive-threshold cluster check on a narrow strip detects ``+``.
+
+* **Dark fallback** — translucent dark bars with white text.  A regular
+  ``+points`` grid locates each row so its rank and name can be read in
+  separate crops.
 """
 
 from __future__ import annotations
@@ -82,11 +86,22 @@ class RaceResultDetector:
 
             ``None`` when no result rows are detected.
         """
+        dark = None
         if teams:
             from mktracker.detection.team_results import _bands, read_team_results
             colored = read_team_results(frame)
             if colored is not None or len(_bands(frame)) >= 3:
                 return colored
+            from mktracker.detection.dark_results import (
+                add_highlighted_row, has_dark_bar_contrast, read_dark_results,
+            )
+            starts = self._plus_cluster_starts(frame)
+            grid_rows = self._plus_clusters_on_grid(starts, frame.shape[0])
+            if (grid_rows >= 4
+                    and has_dark_bar_contrast(frame)):
+                dark = read_dark_results(frame, starts)
+                if dark is not None and grid_rows >= 7:
+                    return add_highlighted_row(dark, frame)
         h, w = frame.shape[:2]
         x1 = int(w * _ROI_X1)
         x2 = int(w * _ROI_X2)
@@ -126,12 +141,31 @@ class RaceResultDetector:
             has_plus = False
 
         if not parsed_rows:
+            if dark is not None:
+                from mktracker.detection.dark_results import add_highlighted_row
+                return add_highlighted_row(dark, frame)
             return None
 
         results = self._fix_placements(parsed_rows)
 
         if has_plus and len(results) >= 3:
-            return {"type": "race", "results": results}
+            race = {"type": "race", "results": results}
+            if teams:
+                from mktracker.detection.dark_results import add_highlighted_row
+                if dark is not None:
+                    # The row-specific dark-screen reader has both a tighter crop
+                    # and real OCR confidences. Keep the legacy pass only for
+                    # ranks absent from that reader (usually a scrolling tail).
+                    merged = dict(race["results"])
+                    merged.update(dark["results"])
+                    race["results"] = sorted(merged.items())
+                    race["confidences"] = dark["confidences"]
+                return add_highlighted_row(race, frame)
+            return race
+
+        if dark is not None:
+            from mktracker.detection.dark_results import add_highlighted_row
+            return add_highlighted_row(dark, frame)
 
         if len(results) >= _MIN_ROWS_FOR_OVERALL:
             return {"type": "overall"}
