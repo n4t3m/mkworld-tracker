@@ -144,12 +144,29 @@ additional low-saturation and brightness masks, with stricter shape agreement
 to distinguish the numeral from its translucent outline and background. This
 also works when seeking directly into a fade, without an earlier solid reading.
 Fully invisible, heavily obscured or ambiguous indicators can still show a dash.
+The reader searches a broad lower-right area for aligned numeral/suffix shapes;
+it does not require the baseline or right edge from the recording with black
+bars. Limited aspect tolerance handles padding followed by capture resizing.
+Regression tests include original capture-card frames, side/top/bottom and
+asymmetric padding at several resolutions. Some gradient fills remain uncertain.
 No API key or full-video rescan is
 needed. This reader currently supports **1st–12th in the single-player,
 full-screen layout** used by the supplied blue/red team recordings. Larger
 rooms, split-screen and other HUD layouts need additional reference footage.
 It is connected only to Video Review, not live tracking, and does not yet save
 a position history to the timeline.
+
+**Coins** reads the current frame's two-digit counter locally in Custom Room
+Video Review. It finds the coin icon in the lower-left region and uses its
+location and size to crop the digits, accommodating capture padding instead
+of assuming the recording's black bars. Tests cover direct capture-card frames,
+colored/neutral panels, yellow digits at 20, and added side/top/bottom padding.
+It reads 0–20, including zero and pickup digit animations. A dash
+means the icon is missing or the digits are uncertain. It updates on
+playback and direct paused seeks without keeping a previous count. Templates
+are bundled; no API key, game font, OCR process or rescan is needed. Other HUD
+layouts, extreme padding/cropping and heavily faded counters may remain unknown. Counts are not yet
+saved to the timeline or connected to Live View.
 
 Open the **Video Review** tab, choose **Custom Room**, then **Open Video…** and select an MP4 (or another
 OpenCV-supported video). Analysis starts locally in the background. The video

@@ -17,6 +17,62 @@ FIXTURES = Path(__file__).parent / "fixtures" / "hud_position"
 CASES = json.loads((FIXTURES / "labels.json").read_text())
 FADE_CASES = json.loads((FIXTURES / "fades.json").read_text())
 
+CAPTURE_CASES = {
+    "bad_false_finish_1": None, "bad_false_finish_2": None,  # Hidden / 14th.
+    "bad_gameplay_boost": 1, "bad_gameplay_desert": 1,
+    "bad_gameplay_desert2": None,  # 21st is outside the supported 12-player set.
+    "bad_gameplay_glider": 3, "bad_gameplay_lava": None,  # Heavy glow/fade.
+    "bad_gameplay_lava2": 1, "bad_gameplay_spaceport": 5,
+    "bad_gameplay_yellow_road": None,  # Gradient fill remains ambiguous.
+    "bad_gameplay_yoshi_sign": None, "bad_go": None, "bad_go_warm": None,
+    "bad_partial_finish": 1, "bad_results": None, "bad_track_select": None,
+    "finish_good": 1, "finish_good_0418_02": None, "finish_good_0418_03": None,
+    "finish_good_0418_04": 12, "finish_good_0418_06": None,
+    "finish_good_0418_07": None, "finish_good_0419_01": None,
+    "finish_good_0419_02": None, "finish_good_0419_04": None,
+    "finish_good_0419_05": None, "finish_good_0419_06": None,
+    "finish_good_0419_07": None, "finish_good_0419_08": None,
+    "finish_good_chain_chomp": None, "finish_good_dockyard": None,
+    "finish_good_lava": None, "finish_good_temple": None,
+}
+
+
+@pytest.mark.parametrize("name,expected", CAPTURE_CASES.items())
+def test_direct_capture_frames(reader, name, expected):
+    frame = cv2.imread(str(FIXTURES.parent / "race_finish" / f"{name}.png"))
+    assert reader.read(frame) == expected
+
+
+@pytest.mark.parametrize("padding", [(0, 0, 48, 48), (60, 60, 0, 0),
+                                     (37, 83, 71, 23), (108, 108, 192, 192)])
+@pytest.mark.parametrize("size", [(1920, 1080), (1280, 720), (960, 540)])
+def test_capture_padding(reader, padding, size):
+    for name, expected in [("bad_gameplay_boost", 1), ("bad_gameplay_glider", 3),
+                           ("bad_gameplay_spaceport", 5), ("finish_good_0418_04", 12)]:
+        frame = cv2.imread(str(FIXTURES.parent / "race_finish" / f"{name}.png"))
+        frame = cv2.copyMakeBorder(frame, *padding, cv2.BORDER_CONSTANT, value=0)
+        assert reader.read(cv2.resize(frame, size)) == expected
+
+
+@pytest.mark.parametrize("padding", [(0, 0, 48, 48), (60, 60, 0, 0), (37, 83, 71, 23)])
+def test_recording_huds_translate_with_padding(reader, padding):
+    for name, expected in [("oct-80.png", 12), ("oct-130.png", 8),
+                           ("sep-105.png", 1), ("fade-oct-70.00.png", 4)]:
+        frame = cv2.copyMakeBorder(frame_for(name), *padding, cv2.BORDER_CONSTANT, value=0)
+        assert reader.read(frame) == expected
+
+
+OTHER_FRAMES = [p for folder in ["track_select", "player_reader", "race_results",
+                               "match_results", "team_results", "video_analysis"]
+               for p in (FIXTURES.parent / folder).glob("*")
+               if p.suffix.lower() in (".png", ".jpg")]
+
+
+@pytest.mark.parametrize("path", OTHER_FRAMES, ids=lambda p: f"{p.parent.name}/{p.name}")
+def test_other_full_frames(reader, path):
+    expected = {"20260329_144018.png": 1, "result-animation.jpg": 2}.get(path.name)
+    assert reader.read(cv2.imread(str(path))) == expected
+
 
 def frame_for(name):
     frame = np.zeros((1080, 1920, 3), np.uint8)

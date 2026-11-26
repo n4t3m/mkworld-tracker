@@ -1,0 +1,247 @@
+[
+  {
+    "image": "oct-75.png",
+    "coins": 0,
+    "seconds": 75
+  },
+  {
+    "image": "oct-85.png",
+    "coins": 0,
+    "seconds": 85
+  },
+  {
+    "image": "oct-91.png",
+    "coins": 2,
+    "seconds": 91
+  },
+  {
+    "image": "oct-97.png",
+    "coins": 3,
+    "seconds": 97
+  },
+  {
+    "image": "oct-109.png",
+    "coins": 5,
+    "seconds": 109
+  },
+  {
+    "image": "oct-139.png",
+    "coins": 9,
+    "seconds": 139
+  },
+  {
+    "image": "oct-148.png",
+    "coins": 10,
+    "seconds": 148
+  },
+  {
+    "image": "oct-169.png",
+    "coins": 13,
+    "seconds": 169
+  },
+  {
+    "image": "oct-184.png",
+    "coins": 14,
+    "seconds": 184
+  },
+  {
+    "image": "oct-200.png",
+    "coins": 11,
+    "seconds": 200
+  },
+  {
+    "image": "oct-210.png",
+    "coins": null,
+    "seconds": 210
+  },
+  {
+    "image": "oct-310.png",
+    "coins": 6,
+    "seconds": 310
+  },
+  {
+    "image": "oct-320.png",
+    "coins": 7,
+    "seconds": 320
+  },
+  {
+    "image": "oct-330.png",
+    "coins": 4,
+    "seconds": 330
+  },
+  {
+    "image": "oct-350.png",
+    "coins": 6,
+    "seconds": 350
+  },
+  {
+    "image": "oct-370.png",
+    "coins": 4,
+    "seconds": 370
+  },
+  {
+    "image": "oct-390.png",
+    "coins": 7,
+    "seconds": 390
+  },
+  {
+    "image": "oct-430.png",
+    "coins": null,
+    "seconds": 430
+  },
+  {
+    "image": "oct-460.png",
+    "coins": null,
+    "seconds": 460
+  },
+  {
+    "image": "oct-510.png",
+    "coins": 1,
+    "seconds": 510
+  },
+  {
+    "image": "oct-530.png",
+    "coins": 2,
+    "seconds": 530
+  },
+  {
+    "image": "oct-550.png",
+    "coins": 7,
+    "seconds": 550
+  },
+  {
+    "image": "oct-555.3.png",
+    "coins": 8,
+    "seconds": 555.3
+  },
+  {
+    "image": "oct-555.6.png",
+    "coins": 8,
+    "seconds": 555.6
+  },
+  {
+    "image": "oct-560.png",
+    "coins": 9,
+    "seconds": 560
+  },
+  {
+    "image": "oct-570.png",
+    "coins": 12,
+    "seconds": 570
+  },
+  {
+    "image": "oct-620.png",
+    "coins": 16,
+    "seconds": 620
+  },
+  {
+    "image": "oct-850.png",
+    "coins": 11,
+    "seconds": 850
+  },
+  {
+    "image": "sep-75.png",
+    "coins": null,
+    "seconds": 75
+  },
+  {
+    "image": "sep-90.png",
+    "coins": 0,
+    "seconds": 90
+  },
+  {
+    "image": "sep-105.png",
+    "coins": 1,
+    "seconds": 105
+  },
+  {
+    "image": "sep-120.png",
+    "coins": 1,
+    "seconds": 120
+  },
+  {
+    "image": "sep-135.png",
+    "coins": 3,
+    "seconds": 135
+  },
+  {
+    "image": "sep-150.png",
+    "coins": 11,
+    "seconds": 150
+  },
+  {
+    "image": "sep-165.png",
+    "coins": 11,
+    "seconds": 165
+  },
+  {
+    "image": "sep-180.png",
+    "coins": 11,
+    "seconds": 180
+  },
+  {
+    "image": "sep-195.png",
+    "coins": 19,
+    "seconds": 195
+  },
+  {
+    "image": "sep-210.png",
+    "coins": 19,
+    "seconds": 210
+  },
+  {
+    "image": "sep-225.png",
+    "coins": 19,
+    "seconds": 225
+  },
+  {
+    "image": "sep-240.png",
+    "coins": 19,
+    "seconds": 240
+  },
+  {
+    "image": "sep-255.png",
+    "coins": null,
+    "seconds": 255
+  },
+  {
+    "image": "sep-270.png",
+    "coins": null,
+    "seconds": 270
+  },
+  {
+    "image": "sep-285.png",
+    "coins": null,
+    "seconds": 285
+  },
+  {
+    "image": "sep-300.png",
+    "coins": null,
+    "seconds": 300
+  },
+  {
+    "image": "sep-315.png",
+    "coins": null,
+    "seconds": 315
+  },
+  {
+    "image": "sep-330.png",
+    "coins": null,
+    "seconds": 330
+  },
+  {
+    "image": "sep-345.png",
+    "coins": 0,
+    "seconds": 345
+  },
+  {
+    "image": "sep-360.png",
+    "coins": 0,
+    "seconds": 360
+  },
+  {
+    "image": "sep-375.png",
+    "coins": 1,
+    "seconds": 375
+  }
+]

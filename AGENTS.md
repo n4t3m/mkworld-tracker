@@ -12,15 +12,32 @@ paths; current source and this handoff take precedence over those descriptions.
 - Custom Room is implemented. Worldwides and Time Trial selectors are placeholders.
 - Race position is implemented **only in Video Review**, for single-player,
   full-screen 1st–12th HUDs. Do not connect it to live tracking as part of unrelated
-  work. Coin count, lap/checkpoint and item reading have not been implemented.
+  work. Coin count is also implemented only in Video Review for blue/red
+  single-player colored/neutral HUDs (0–20); lap/checkpoint and item reading are
+  not implemented.
 - The position is read from each displayed frame, including direct seeks while
   paused. It is not saved as a time series. Missing/ambiguous evidence shows a
   dash; do not silently retain the last position across hidden HUDs or seeks.
 
 ## Code map
 
+- `src/mktracker/detection/hud_coins.py` and `coin_templates/`: local two-digit
+  coin matching anchored to a detected gold coin icon in the lower-left region.
+  Icon diameter supplies crop scale; do not restore recording-specific offsets.
+  Supports neutral panels and yellow maximum-count numerals. Each frame is
+  independent; hidden/ambiguous counts show a dash. `tests/test_hud_coins.py`
+  uses tracked held-out crops from two recordings, including digit animations,
+  resizing, recompressed video, direct seeks and mode changes, plus original
+  full capture-card fixtures and asymmetric side/top/bottom padding. Run it alongside
+  position and video-review regressions when changing the shared UI.
+
 - `src/mktracker/detection/hud_position.py`: local position shape matching. The
-  normal masks run first; fade masks compensate for low saturation, shifted hue
+  search covers the lower-right 35% in each dimension; numeral/suffix alignment
+  replaces recording-specific baseline checks. Narrow aspect variations handle
+  capture padding/resizing. Tests reuse full direct-capture frames and transformed
+  versions, including unsupported ranks and hidden HUDs. Some gradient fills
+  remain unknown; do not turn these into guessed positions.
+  Normal masks run first; fade masks compensate for low saturation, shifted hue
   and translucent outlines, with stronger shape/margin requirements.
 - `src/mktracker/detection/position_templates/`: bundled 1st–12th silhouettes
   and their provenance. These must remain available in installed packages.
@@ -99,6 +116,26 @@ improving sensitivity. Add real evidence for larger rooms or other HUD layouts
 before claiming support.
 
 ## Optional full-recording spot checks
+
+### Latest validation and next work
+
+- YouTube `GxDrSh-Ee20`, source 1:00–33:14, was downloaded locally to
+  `../recordings/GxDrSh-Ee20_00-01-00_to_00-33-14.mp4` (1080p60, 32:14).
+  Recording and evidence are ignored local assets, not carried by Git.
+- This footage uses a 24-player neutral HUD. At clip 2:00 (source 3:00),
+  visible **19th is incorrectly read as 10th**. Fix unsupported-rank rejection
+  before claiming support; several valid ranks also remain unknown.
+- The full scan produced 12 race entries, seven unknown courses, and only one
+  results timestamp with 11 draft names. Boundary verification fails on race 1's
+  missing results. The timeline is not a verified complete race/results record.
+- Five-second sampling produced 387 frames, with 155 position and 339 coin
+  readings. These measure availability, not accuracy. Coin samples looked
+  plausible but have not been exhaustively hand-labeled.
+- Local evidence and scripts: `analysis/youtube-validation/` (report, timeline,
+  HUD samples, contact sheets, GUI and boundary checks). Cached opening and eight
+  direct seeks passed. Full regression log: `analysis/youtube-tests-final.log`:
+  **887 passed, six failed**, all six due to missing legacy screenshots under
+  `testdata/trackselected/`; four pytest fixture deprecation warnings.
 
 These recordings are external; the filenames identify source footage, not
 paths expected to exist on every machine:

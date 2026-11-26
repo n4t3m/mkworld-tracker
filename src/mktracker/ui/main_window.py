@@ -38,6 +38,7 @@ from mktracker.capture.video_source import VideoCapture, enumerate_sources
 from mktracker.debug_config import load_debug_mode, save_debug_mode
 from mktracker.detection.match_settings import MatchSettings
 from mktracker.detection.hud_position import HudPositionReader
+from mktracker.detection.hud_coins import HudCoinReader
 from mktracker.discord_webhook import (
     EVENT_MATCH_END,
     EVENT_MATCH_START,
@@ -180,6 +181,7 @@ class MainWindow(QMainWindow):
         self._analysis_thread: _VideoAnalysisThread | None = None
         self._selected_video_race = 0
         self._position_reader = HudPositionReader()
+        self._coin_reader = HudCoinReader()
 
         self._build_ui()
         if not initial_video:
@@ -348,6 +350,10 @@ class MainWindow(QMainWindow):
         self._review_position.setStyleSheet("font-size: 18px; font-weight: bold; padding: 4px;")
         self._review_position.setToolTip("Local HUD reading for this video frame. A dash means the position is hidden or uncertain.")
         outer.addWidget(self._review_position)
+        self._review_coins = QLabel("Coins: —")
+        self._review_coins.setStyleSheet("font-size: 18px; font-weight: bold; padding: 4px;")
+        self._review_coins.setToolTip("Local coin count for this frame. A dash means the HUD is hidden or uncertain.")
+        outer.addWidget(self._review_coins)
         self._review_video_label = QLabel("Open a video to review recorded gameplay")
         self._review_video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._review_video_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
@@ -417,6 +423,7 @@ class MainWindow(QMainWindow):
     def open_video(self, path: str) -> bool:
         self._stop_video_analysis()
         self._review_position.setText("Race position: —")
+        self._review_coins.setText("Coins: —")
         if not self._capture.open_file(path):
             self._set_playback_enabled(False)
             self._analysis_progress.hide()
@@ -1200,11 +1207,14 @@ class MainWindow(QMainWindow):
 
     def _update_review_position(self, frame: np.ndarray | None) -> None:
         rank = None
+        coins = None
         if frame is not None and self._review_mode_combo.currentText() == "Custom Room":
             rank = self._position_reader.read(frame)
+            coins = self._coin_reader.read(frame)
         suffix = {1: "st", 2: "nd", 3: "rd"}.get(rank, "th")
         value = f"{rank}{suffix}" if rank is not None else "—"
         self._review_position.setText(f"Race position: {value}")
+        self._review_coins.setText(f"Coins: {coins if coins is not None else '—'}")
 
     def _update_live_frame(self) -> None:
         frame = self._live_capture.read_frame()

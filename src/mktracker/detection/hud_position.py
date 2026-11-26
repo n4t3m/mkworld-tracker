@@ -10,16 +10,18 @@ import numpy as np
 
 
 def position_masks(frame: np.ndarray, *, faded: bool = False) -> list[np.ndarray]:
-    """Extract colored HUD silhouettes at a resolution independent scale."""
+    """Find numeral/suffix silhouettes within a broad lower-right search area."""
     if frame is None or frame.size == 0:
         return []
     h, w = frame.shape[:2]
-    roi = frame[int(h * .75):h, int(w * .82):w]
-    roi = cv2.resize(roi, (346, 270), interpolation=cv2.INTER_AREA)
+    # Search for aligned numeral/suffix shapes instead of requiring the
+    # baseline or right edge to match one recording's black borders.
+    roi = frame[int(h * .65):h, int(w * .65):w]
+    roi = cv2.resize(roi, (672, 378), interpolation=cv2.INTER_AREA)
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     hue, sat, val = cv2.split(hsv)
     blue = (hue >= 80) & (hue <= 115)
-    warm = (hue <= 30) | (hue >= 170)
+    warm = (hue <= 35) | (hue >= 140)
     if faded:
         # Alpha blending both desaturates the fill and changes its hue. On
         # bright backgrounds the translucent outline can join numeral and
@@ -31,7 +33,10 @@ def position_masks(frame: np.ndarray, *, faded: bool = False) -> list[np.ndarray
                    for color in (blue, warm) for brightness in (150, 180, 200)]
     else:
         colors = [((hue >= 80) & (hue <= 103) & (sat > 150), 90, 100),
-                  (blue, 90, 100),
+                  (blue, 90, 100), (warm, 65, 150),
+                  ((hue <= 18) | (hue >= 170), 90, 150),
+                  ((hue <= 18) | (hue >= 170), 90, 180),
+                  ((hue <= 18) | (hue >= 170), 90, 200),
                   ((hue <= 18) | (hue >= 170), 90, 100), (hue <= 30, 90, 100)]
     results = []
     for color, saturation, brightness in colors:
@@ -39,16 +44,16 @@ def position_masks(frame: np.ndarray, *, faded: bool = False) -> list[np.ndarray
         n, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
         digits = [i for i in range(1, n)
                   if 90 <= stats[i, 3] <= 220 and 18 <= stats[i, 2] <= 260
-                  and stats[i, 4] >= 500 and stats[i, 1] >= 15
-                  and 195 <= stats[i, 1] + stats[i, 3] <= 240
-                  and stats[i, 0] > 0 and stats[i, 0] + stats[i, 2] < 345]
+                  and stats[i, 4] >= 500 and stats[i, 1] > 0
+                  and stats[i, 1] + stats[i, 3] < 377
+                  and stats[i, 0] > 0 and stats[i, 0] + stats[i, 2] < 671]
         if not digits:
             continue
         right = max(stats[i, 0] + stats[i, 2] for i in digits)
         bottom = max(stats[i, 1] + stats[i, 3] for i in digits)
         suffix = [i for i in range(1, n) if i not in digits
                   and 23 <= stats[i, 3] <= 85 and stats[i, 4] >= 400
-                  and stats[i, 2] <= 100 and stats[i, 0] + stats[i, 2] < 345
+                  and stats[i, 2] <= 100 and stats[i, 0] + stats[i, 2] < 671
                   and abs(stats[i, 1] + stats[i, 3] - bottom) <= 15
                   and right - 70 <= stats[i, 0] <= right + 55
                   and bottom - 90 <= stats[i, 1] <= bottom + 10]
@@ -62,13 +67,15 @@ def position_masks(frame: np.ndarray, *, faded: bool = False) -> list[np.ndarray
         top, bottom = np.quantile(ys, [.015, .995]).astype(int)
         left, right = np.quantile(xs, [.005, .995]).astype(int)
         cut = silhouette[top:bottom+1, left:right+1]
-        # Preserve aspect ratio: stretching would confuse 1st and 11th.
-        scale = min(120 / cut.shape[1], 100 / cut.shape[0])
-        cut = cv2.resize(cut, (max(1, round(cut.shape[1]*scale)),
-                               max(1, round(cut.shape[0]*scale))))
-        canvas = np.zeros((108, 128), np.uint8)
-        canvas[4:4+cut.shape[0], 4:4+cut.shape[1]] = cut
-        results.append(canvas)
+        # Small aspect variations compensate for padding followed by capture
+        # resizing. Keep the range narrow so 1st and 11th stay distinct.
+        for aspect in (.9, .95, 1., 1.05, 1.1):
+            scale = min(120 / (cut.shape[1] * aspect), 100 / cut.shape[0])
+            resized = cv2.resize(cut, (max(1, round(cut.shape[1]*scale*aspect)),
+                                      max(1, round(cut.shape[0]*scale))))
+            canvas = np.zeros((108, 128), np.uint8)
+            canvas[4:4+resized.shape[0], 4:4+resized.shape[1]] = resized
+            results.append(canvas)
     return results
 
 
