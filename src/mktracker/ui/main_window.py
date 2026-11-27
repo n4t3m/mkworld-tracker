@@ -440,7 +440,10 @@ class MainWindow(QMainWindow):
         self._timeline = VideoTimeline.load(path, self._capture.duration)
         self._selected_video_race = 0
         self._seek_slider.setRange(0, round(self._capture.duration * 1000))
-        self._timer.setInterval(max(1, round(1000 / self._capture.fps)))
+        # Full-resolution HUD matching can exceed a 60 fps frame budget.
+        # The wall clock still selects the source frame, so a steady 30 fps
+        # preview preserves playback speed without saturating the UI thread.
+        self._timer.setInterval(max(1, round(1000 / min(self._capture.fps, 30))))
         self._set_playback_enabled(True)
         self._playback_clock = None
         self._paused = False
@@ -1233,7 +1236,8 @@ class MainWindow(QMainWindow):
         if frame is not None and self._review_mode_combo.currentText() == "Custom Room":
             rank = self._position_reader.read(frame)
             coins = self._coin_reader.read(frame)
-        suffix = {1: "st", 2: "nd", 3: "rd"}.get(rank, "th")
+        suffix = ("th" if rank is None or 10 <= rank % 100 <= 20
+                  else {1: "st", 2: "nd", 3: "rd"}.get(rank % 10, "th"))
         value = f"{rank}{suffix}" if rank is not None else "—"
         self._review_position.setText(f"Race position: {value}")
         self._review_coins.setText(f"Coins: {coins if coins is not None else '—'}")

@@ -11,7 +11,7 @@ paths; current source and this handoff take precedence over those descriptions.
   playback/analysis must not reset live tracking or send Discord notifications.
 - Custom Room is implemented. Worldwides and Time Trial selectors are placeholders.
 - Race position is implemented **only in Video Review**, for single-player,
-  full-screen 1st–12th HUDs. Do not connect it to live tracking as part of unrelated
+  full-screen 1st–24th HUDs. Do not connect it to live tracking as part of unrelated
   work. Coin count is also implemented only in Video Review for blue/red
   single-player colored/neutral HUDs (0–20); lap/checkpoint and item reading are
   not implemented.
@@ -35,12 +35,13 @@ paths; current source and this handoff take precedence over those descriptions.
   search covers the lower-right 35% in each dimension; numeral/suffix alignment
   replaces recording-specific baseline checks. Narrow aspect variations handle
   capture padding/resizing. Tests reuse full direct-capture frames and transformed
-  versions, including unsupported ranks and hidden HUDs. Some gradient fills
+  versions, including 14th/21st and hidden HUDs. Some gradient fills
   remain unknown; do not turn these into guessed positions.
   Normal masks run first; fade masks compensate for low saturation, shifted hue
   and translucent outlines, with stronger shape/margin requirements.
-- `src/mktracker/detection/position_templates/`: bundled 1st–12th silhouettes
-  and their provenance. These must remain available in installed packages.
+- `src/mktracker/detection/position_templates/`: bundled 1st–24th silhouettes
+  and neutral 2nd/3rd edge templates, with their provenance. These must remain
+  available in installed packages.
 - `src/mktracker/ui/main_window.py`: Video Review position label, playback,
   seeking, independent live capture and background video-analysis thread.
 - `src/mktracker/video_analysis.py`: recorded race boundaries and result-name
@@ -109,8 +110,8 @@ The broader suite includes optional local-font tests and older tests that need
 ignored `testdata/`; inspect skips/failures before claiming full-suite coverage.
 
 Position fixtures include separate template-source and validation timestamps;
-`labels.json` and `fades.json` record manually assigned values. Tests cover
-real blue/red HUDs, fades, no-HUD frames, resizing, recompressed video, direct
+`labels.json`, `labels_24p.json` and `fades.json` record manually assigned values. Tests cover
+real blue/red and 24-player neutral HUDs, fades, no-HUD frames, resizing, recompressed video, direct
 seeks, playback and live/review isolation. Keep unknown-frame rejection when
 improving sensitivity. Add real evidence for larger rooms or other HUD layouts
 before claiming support.
@@ -119,21 +120,24 @@ before claiming support.
 
 ### Latest validation and next work
 
-- YouTube `GxDrSh-Ee20`, source 1:00–33:14, was downloaded locally to
-  `../recordings/GxDrSh-Ee20_00-01-00_to_00-33-14.mp4` (1080p60, 32:14).
-  Recording and evidence are ignored local assets, not carried by Git.
-- This footage uses a 24-player neutral HUD. At clip 2:00 (source 3:00),
-  visible **19th is incorrectly read as 10th**. Fix unsupported-rank rejection
-  before claiming support; several valid ranks also remain unknown.
+- YouTube `GxDrSh-Ee20`, source 1:00–33:14, was downloaded for validation
+  (1080p60, 32:14) and later deleted locally at the user's request.
+  The recording is not carried by Git; tracked HUD crops preserve test evidence.
+- This footage uses a 24-player neutral HUD. The earlier visible 19th at clip
+  2:00 (source 3:00) was read as 10th; the 13th–24th templates now read it as
+  19th. Held-out crops cover all twelve high ranks and pastel 2nd/3rd HUDs.
+  Other gradient fills and extreme fades can still be unknown.
 - The full scan produced 12 race entries, seven unknown courses, and only one
   results timestamp with 11 draft names. Boundary verification fails on race 1's
   missing results. The timeline is not a verified complete race/results record.
 - Five-second sampling produced 387 frames, with 155 position and 339 coin
   readings. These measure availability, not accuracy. Coin samples looked
   plausible but have not been exhaustively hand-labeled.
-- Local evidence and scripts: `analysis/youtube-validation/` (report, timeline,
-  HUD samples, contact sheets, GUI and boundary checks). Cached opening and eight
-  direct seeks passed. Full regression log: `analysis/youtube-tests-final.log`:
+- Earlier ignored evidence and scripts were under `analysis/youtube-validation/`
+  (report, timeline, HUD samples, contact sheets, GUI and boundary checks); that
+  directory is not carried by Git. New HUD crops and labels are tracked under
+  `tests/fixtures/hud_position/`. Cached opening and eight earlier direct seeks
+  passed. Earlier full regression log: `analysis/youtube-tests-final.log`:
   **887 passed, six failed**, all six due to missing legacy screenshots under
   `testdata/trackselected/`; four pytest fixture deprecation warnings.
 

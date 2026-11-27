@@ -24,3 +24,11 @@ false positives. `race_results_negative/` and
 
 The `24p` suffix records the player count **in the captured fixture**. Reader
 routing is based on the screen's appearance and row geometry, not player count.
+
+## Placement HUD fixtures
+
+`hud_position/labels.json` and `hud_position/fades.json` hold blue/red 12-player
+HUD crops. `hud_position/labels_24p.json` holds separately sampled 24-player
+neutral HUD crops from YouTube `GxDrSh-Ee20`, with visible pastel 2nd/3rd and
+every rank from 13th through 24th, plus hidden or obscured HUD negatives. These are
+in-race placements, not result-table ranks.

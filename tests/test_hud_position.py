@@ -15,12 +15,13 @@ from mktracker.ui.main_window import MainWindow
 
 FIXTURES = Path(__file__).parent / "fixtures" / "hud_position"
 CASES = json.loads((FIXTURES / "labels.json").read_text())
+CASES += json.loads((FIXTURES / "labels_24p.json").read_text())
 FADE_CASES = json.loads((FIXTURES / "fades.json").read_text())
 
 CAPTURE_CASES = {
-    "bad_false_finish_1": None, "bad_false_finish_2": None,  # Hidden / 14th.
+    "bad_false_finish_1": None, "bad_false_finish_2": 14,
     "bad_gameplay_boost": 1, "bad_gameplay_desert": 1,
-    "bad_gameplay_desert2": None,  # 21st is outside the supported 12-player set.
+    "bad_gameplay_desert2": 21,
     "bad_gameplay_glider": 3, "bad_gameplay_lava": None,  # Heavy glow/fade.
     "bad_gameplay_lava2": 1, "bad_gameplay_spaceport": 5,
     "bad_gameplay_yellow_road": None,  # Gradient fill remains ambiguous.
@@ -70,7 +71,8 @@ OTHER_FRAMES = [p for folder in ["track_select", "player_reader", "race_results"
 
 @pytest.mark.parametrize("path", OTHER_FRAMES, ids=lambda p: f"{p.parent.name}/{p.name}")
 def test_other_full_frames(reader, path):
-    expected = {"20260329_144018.png": 1, "result-animation.jpg": 2}.get(path.name)
+    expected = {"20260329_144018.png": 1, "result-animation.jpg": 2,
+                "ghost-valley-false-results.jpg": 1}.get(path.name)
     assert reader.read(cv2.imread(str(path))) == expected
 
 
@@ -168,5 +170,30 @@ def test_direct_seek_reads_faded_numbers_and_clears_hidden_hud(tmp_path, monkeyp
             window._seek_video(index)
             assert window._review_position.text() == f"Race position: {samples[index][1]}"
             assert window._paused
+    finally:
+        window.close()
+
+
+def test_24_player_positions_update_video_review_on_direct_seeks(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(MainWindow, "_start_video_analysis", lambda self: None)
+    path = tmp_path / "positions-24p.mp4"
+    samples = [("gx-0155.jpg", "19th"), ("gx-0610.jpg", "2nd"),
+               ("gx-0420.jpg", "3rd"), ("gx-0165.jpg", "21st"),
+               ("gx-0950.jpg", "22nd"), ("gx-0330.jpg", "23rd"),
+               ("gx-0910.jpg", "24th"), ("gx-0270.jpg", "—")]
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 4, (1920, 1080))
+    assert writer.isOpened()
+    for name, _ in samples:
+        for _ in range(4):
+            writer.write(frame_for(name))
+    writer.release()
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(initial_video=str(path))
+    try:
+        assert window._review_position.text() == "Race position: 19th"
+        for index in [6, 1, 4, 7, 2, 3, 5, 0]:
+            window._seek_video(index)
+            assert window._review_position.text() == f"Race position: {samples[index][1]}"
     finally:
         window.close()

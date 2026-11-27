@@ -150,11 +150,15 @@ bars. Limited aspect tolerance handles padding followed by capture resizing.
 Regression tests include original capture-card frames, side/top/bottom and
 asymmetric padding at several resolutions. Some gradient fills remain uncertain.
 No API key or full-video rescan is
-needed. This reader currently supports **1st–12th in the single-player,
-full-screen layout** used by the supplied blue/red team recordings. Larger
-rooms, split-screen and other HUD layouts need additional reference footage.
+needed. This reader supports **1st–24th in the single-player, full-screen
+layout**. Templates for 13th–24th come from the 24-player neutral HUD in
+`GxDrSh-Ee20`; tests include held-out frames from that recording. Some
+gradient-filled and heavily faded indicators still show a dash. Split-screen
+and other HUD layouts need additional reference footage.
 It is connected only to Video Review, not live tracking, and does not yet save
 a position history to the timeline.
+Video Review previews 60 fps sources at up to 30 displayed frames per second
+while following the source clock, so HUD matching does not slow playback.
 
 **Coins** reads the current frame's two-digit counter locally in Custom Room
 Video Review. It finds the coin icon in the lower-left region and uses its

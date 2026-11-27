@@ -69,9 +69,10 @@ OTHER_FRAMES = [p for folder in ["track_select", "player_reader", "race_results"
 
 @pytest.mark.parametrize("path", OTHER_FRAMES, ids=lambda p: f"{p.parent.name}/{p.name}")
 def test_other_screens_and_remaining_visible_huds(path):
-    # These three files still show the in-race HUD despite their fixture folder.
+    # These files still show the in-race HUD despite their fixture folder.
     expected = {"20260329_144018.png": 4, "bad_finish_banner_blue_sky.png": 7,
-                "result-animation.jpg": 4}.get(path.name)
+                "result-animation.jpg": 4,
+                "ghost-valley-false-results.jpg": 20}.get(path.name)
     assert HudCoinReader().read(cv2.imread(str(path))) == expected
 
 

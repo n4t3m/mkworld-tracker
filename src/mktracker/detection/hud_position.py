@@ -80,17 +80,26 @@ def position_masks(frame: np.ndarray, *, faded: bool = False) -> list[np.ndarray
 
 
 class HudPositionReader:
-    """Read 1st–12th in a single-player HUD; reject missing/ambiguous shapes.
+    """Read 1st–24th in a single-player HUD; reject missing/ambiguous shapes.
 
-    These templates cover the 12-player custom-room recordings. Other layouts
-    and larger rooms need additional reference footage before being supported.
+    Templates cover the colored 12-player recordings and orange 24-player
+    footage. Other layouts need reference footage before being supported.
     """
 
     def __init__(self) -> None:
         self.templates = []
-        for path in sorted((Path(__file__).parent / "position_templates").glob("*.png")):
+        template_dir = Path(__file__).parent / "position_templates"
+        for path in sorted(template_dir.glob("*.png")):
             mask = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
             self.templates.append((int(path.stem.split("-")[0]), mask > 127))
+        # Pastel 2nd/3rd fills in the neutral HUD merge with the background
+        # under color thresholding. Their dark outlines remain distinct.
+        self.edge_templates = []
+        for path in sorted((template_dir / "neutral_edges").glob("*.png")):
+            edge = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            self.edge_templates.append((int(path.stem.split("-")[0]),
+                                        cv2.resize(edge, None, fx=.5, fy=.5,
+                                                   interpolation=cv2.INTER_AREA)))
 
     def read(self, frame: np.ndarray) -> int | None:
         rank = self._match(position_masks(frame), minimum=.76, margin=.065)
@@ -98,7 +107,29 @@ class HudPositionReader:
             return rank
         # This is new evidence from the current frame, never a held-over rank.
         # Broader color masks require stronger shape agreement and separation.
-        return self._match(position_masks(frame, faded=True), minimum=.78, margin=.10)
+        rank = self._match(position_masks(frame, faded=True), minimum=.78, margin=.10)
+        return rank if rank is not None else self._match_neutral_edges(frame)
+
+    def _match_neutral_edges(self, frame: np.ndarray) -> int | None:
+        """Read solid pastel 2nd/3rd outlines when color masks cannot isolate them."""
+        if frame is None or frame.size == 0 or not self.edge_templates:
+            return None
+        h, w = frame.shape[:2]
+        roi = cv2.resize(frame[int(h * .65):, int(w * .65):], (672, 378),
+                         interpolation=cv2.INTER_AREA)
+        edges = cv2.Canny(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY), 80, 160)
+        edges = cv2.resize(edges, None, fx=.5, fy=.5,
+                           interpolation=cv2.INTER_AREA)
+        scores = {}
+        for rank, template in self.edge_templates:
+            score = cv2.minMaxLoc(cv2.matchTemplate(edges, template,
+                                                      cv2.TM_CCOEFF_NORMED))[1]
+            scores[rank] = max(score, scores.get(rank, 0))
+        ranked = sorted(scores, key=scores.get, reverse=True)
+        if (not ranked or scores[ranked[0]] < .60 or
+                len(ranked) > 1 and scores[ranked[0]] - scores[ranked[1]] < .12):
+            return None
+        return ranked[0]
 
     def _match(self, masks: list[np.ndarray], *, minimum: float, margin: float) -> int | None:
         scores = {}
