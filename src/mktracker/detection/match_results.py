@@ -207,12 +207,17 @@ _MT_BAR_REGION_SAT_MIN = 0.20
 class MatchResultDetector:
     """Detect and read final match results from the CONGRATULATIONS! screen."""
 
+    def __init__(self, dark_model=None, color_model=None) -> None:
+        self.dark_model = dark_model
+        self.color_model = color_model
+
     def detect(
         self,
         frame: np.ndarray,
         *,
         teams: str = "No Teams",
         player_count: int = 12,
+        model_only: bool = False,
     ) -> dict | None:
         """Attempt to read match results from *frame*.
 
@@ -220,6 +225,14 @@ class MatchResultDetector:
         is fully loaded and all players are readable.  Returns ``None``
         when the screen is not ready (still loading, wrong screen, etc.).
         """
+        reader = self.dark_model if teams == "No Teams" else self.color_model
+        if reader is not None and not getattr(reader, "disabled", False):
+            model_result = self._detect_with_model(
+                frame, teams=teams, player_count=player_count, reader=reader)
+            if model_result is not None:
+                return model_result
+        if model_only:
+            return None
         if teams == "Two Teams" and player_count <= 12:
             return self._detect_two_teams(frame, player_count)
         if teams == "No Teams" and player_count <= 12:
@@ -231,6 +244,32 @@ class MatchResultDetector:
         if teams == "Four Teams" and player_count <= 24:
             return self._detect_multi_team(frame, player_count, team_count=4)
         return None
+
+    def _detect_with_model(self, frame: np.ndarray, *, teams: str,
+                           player_count: int, reader) -> dict | None:
+        """Use game-layout crops after the existing non-OCR readiness checks."""
+        if not self._has_result_banner(frame, teams=teams):
+            return None
+        h, w = frame.shape[:2]
+        if teams == "Two Teams" and player_count <= 12:
+            y1, y2 = int(h * _BARS_Y1), int(h * _BARS_Y2)
+            left = frame[y1:y2, int(w * _LEFT_COL_X1):int(w * _LEFT_COL_X2)]
+            right = frame[y1:y2, int(w * _RIGHT_COL_X1):int(w * _RIGHT_COL_X2)]
+            per_team = max(player_count // 2, 1)
+            if (self._count_bars(left, _RED_HUE) < per_team or
+                    self._count_bars(right, _BLUE_HUE) < per_team):
+                return None
+        elif teams in ("Three Teams", "Four Teams", "Two Teams"):
+            y1 = _MT_LAYOUTS[3]["y1"] if teams == "Three Teams" else _MT_LAYOUTS[4]["y1"]
+            if not self._multi_team_bars_ready(frame[int(h * y1):int(h * _MT_BARS_Y2), :]):
+                return None
+        from mktracker.detection.match_results_model import read_final_standings_rows
+        rows = read_final_standings_rows(
+            frame, teams=teams, player_count=player_count, reader=reader)
+        if len(rows) < max(3, (player_count * 3 + 3) // 4):
+            return None
+        return {"results": [(name, score) for _, _, name, score in rows],
+                "model_rows": rows}
 
     # ------------------------------------------------------------------
     # Two-team layout (≤12 players)

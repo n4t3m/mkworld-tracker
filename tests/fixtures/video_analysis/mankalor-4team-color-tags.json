@@ -1,0 +1,16 @@
+{
+  "image": "overall-standings-colored-human-tags-mankalor-4team-24p.jpg",
+  "source": "https://www.youtube.com/watch?v=HKgKRjDIPms&t=565s",
+  "layout": "overall standings; direct name-crop OCR diagnostic",
+  "row_centers": [582, 649, 714, 779, 844, 910],
+  "columns": {
+    "yellow": {
+      "x_pixels": [1035, 1430],
+      "names": ["Infi.rar", "Kuppa.rar", "Kanade.rar", "Nayeon.rar", "Woomy.rar♪", "Clover.rar"]
+    },
+    "green": {
+      "x_pixels": [1505, 1900],
+      "names": ["BDD Obiyo", "BDD IONA", "BDD Sales", "BDD Mitch", "BDD Julian", "BDDMouse"]
+    }
+  }
+}

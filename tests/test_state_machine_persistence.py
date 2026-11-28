@@ -26,6 +26,7 @@ import pytest
 
 from mktracker.detection.match_settings import MatchSettings
 from mktracker.match_record import MatchRecord
+from mktracker.team_scoring import local_final_standings
 from mktracker.state_machine import (
     GameState,
     GameStateMachine,
@@ -533,6 +534,28 @@ class TestStaleCallbacks:
         rec_b = MatchRecord.load(match_b)
         assert rec_b.final_standings is None
         assert rec_b.completed_at is None
+
+    def test_stale_local_final_card_keeps_team_structure(self, tmp_path: Path):
+        sm = GameStateMachine()
+        match_a = tmp_path / "match_a"
+        _start_match(sm, match_a, _settings(teams="Three Teams"))
+        sm._save_match_record()
+        a_seq = sm._match_seq
+        rows = [(column, row, f"Player {column}-{row}", 30 - row)
+                for column in range(3) for row in range(8)]
+        standings = local_final_standings(rows, "Three Teams", 24)
+        assert standings is not None
+
+        _start_match(sm, tmp_path / "match_b")
+        sm._save_match_record()
+        sm._store_local_final_card(rows, standings, a_seq, match_a)
+
+        saved = MatchRecord.load(match_a)
+        assert saved.final_standings is not None
+        assert saved.final_standings.mode == "three_teams"
+        assert [team.points for team in saved.final_standings.teams] == [212] * 3
+        assert saved.completed_at is not None
+        assert sm._local_final_standings is None
 
     def test_reset_invalidates_in_flight_callbacks(self, tmp_path: Path):
         """reset() bumps _match_seq, so any callback fired after a reset

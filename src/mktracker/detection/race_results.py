@@ -64,6 +64,10 @@ class RaceResultDetector:
         frame: np.ndarray,
         *,
         teams: bool = False,
+        model_only: bool = False,
+        dark_model=None,
+        color_model=None,
+        rank_only: bool = False,
     ) -> dict | None:
         """Analyse *frame* for race results.
 
@@ -88,20 +92,55 @@ class RaceResultDetector:
         """
         dark = None
         if teams:
-            from mktracker.detection.team_results import _bands, read_team_results
-            colored = read_team_results(frame)
-            if colored is not None or len(_bands(frame)) >= 3:
-                return colored
+            from mktracker.detection.team_results import _bands, read_team_grid_for_model, read_team_results
+            bands = _bands(frame)
+            if model_only:
+                if len(bands) >= 3:
+                    return read_team_grid_for_model(
+                        frame, bands, rank_reader=color_model, rank_only=rank_only)
+            else:
+                colored = read_team_results(frame)
+                if colored is not None or len(bands) >= 3:
+                    return colored
             from mktracker.detection.dark_results import (
-                add_highlighted_row, has_dark_bar_contrast, read_dark_results,
+                add_highlighted_row, has_dark_bar_contrast, read_dark_grid_for_model,
+                read_dark_results,
             )
             starts = self._plus_cluster_starts(frame)
             grid_rows = self._plus_clusters_on_grid(starts, frame.shape[0])
+            step = None
+            if grid_rows < 4 and has_dark_bar_contrast(frame):
+                # Some 24-player team rooms place the +points farther right
+                # and use an 81px row pitch. Require most of the visible
+                # score column to form a grid before using that layout.
+                wide_starts = self._plus_cluster_starts(frame, x1=.90, x2=.96)
+                wide_grid = self._plus_clusters_on_grid(
+                    wide_starts, frame.shape[0], spacing=81 / 1080)
+                if wide_grid >= 9 and wide_grid >= len(wide_starts) * .7:
+                    starts, grid_rows, step = wide_starts, wide_grid, round(frame.shape[0] * 81 / 1080)
             if (grid_rows >= 4
                     and has_dark_bar_contrast(frame)):
-                dark = read_dark_results(frame, starts)
+                if model_only:
+                    grid = read_dark_grid_for_model(frame, starts, step=step,
+                                                    rank_reader=dark_model,
+                                                    rank_only=rank_only)
+                    return grid
+                dark = read_dark_results(frame, starts, step=step)
                 if dark is not None and grid_rows >= 7:
                     return add_highlighted_row(dark, frame)
+            if model_only:
+                return None
+        elif model_only:
+            from mktracker.detection.dark_results import (
+                has_dark_bar_contrast, read_dark_grid_for_model,
+            )
+            starts = self._plus_cluster_starts(frame)
+            if (dark_model is not None
+                    and self._plus_clusters_on_grid(starts, frame.shape[0]) >= 4
+                    and has_dark_bar_contrast(frame)):
+                return read_dark_grid_for_model(
+                    frame, starts, rank_reader=dark_model, rank_only=rank_only)
+            return None
         h, w = frame.shape[:2]
         x1 = int(w * _ROI_X1)
         x2 = int(w * _ROI_X2)
@@ -150,6 +189,21 @@ class RaceResultDetector:
 
         if has_plus and len(results) >= 3:
             race = {"type": "race", "results": results}
+            # The generic grey-table path also has a fixed 77px row grid.
+            # Locate it from independently read rank digits so a model can
+            # inspect rows whose legacy name OCR returned no text.
+            anchors = [(y, rank) for y, rank, _ in parsed_rows if rank is not None]
+            step = h * _ROW_SPACING_FRACTION
+            if len(anchors) >= 3:
+                phases = np.array([y - (rank - 1) * step for y, rank in anchors])
+                phase = float(np.median(phases))
+                if int(np.count_nonzero(np.abs(phases - phase) <= step * .2)) >= 3:
+                    low, high = min(y for y, _ in anchors), max(y for y, _ in anchors)
+                    race["row_centers"] = {
+                        rank: round(phase + (rank - 1) * step)
+                        for rank in range(1, 25)
+                        if low - step * .6 <= phase + (rank - 1) * step <= high + step * .6
+                    }
             if teams:
                 from mktracker.detection.dark_results import add_highlighted_row
                 if dark is not None:
@@ -160,6 +214,7 @@ class RaceResultDetector:
                     merged.update(dark["results"])
                     race["results"] = sorted(merged.items())
                     race["confidences"] = dark["confidences"]
+                    race["row_centers"] = dark["row_centers"]
                 return add_highlighted_row(race, frame)
             return race
 
@@ -213,10 +268,11 @@ class RaceResultDetector:
         return binary
 
     @staticmethod
-    def _plus_cluster_starts(frame: np.ndarray) -> list[int]:
+    def _plus_cluster_starts(frame: np.ndarray, *, x1: float = _PLUS_STRIP_X1,
+                             x2: float = _PLUS_STRIP_X2) -> list[int]:
         """Return y-coordinates of ``+N`` clusters in the plus column."""
         h, w = frame.shape[:2]
-        strip = frame[:, int(w * _PLUS_STRIP_X1):int(w * _PLUS_STRIP_X2)]
+        strip = frame[:, int(w * x1):int(w * x2)]
         v = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)[:, :, 2]
         binary = cv2.adaptiveThreshold(
             v, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -251,7 +307,8 @@ class RaceResultDetector:
         return len(cls._plus_cluster_starts(frame)) >= _PLUS_MIN_CLUSTERS
 
     @staticmethod
-    def _plus_clusters_on_grid(starts: list[int], frame_h: int) -> int:
+    def _plus_clusters_on_grid(starts: list[int], frame_h: int,
+                               *, spacing: float = _ROW_SPACING_FRACTION) -> int:
         """Count cluster starts that fit a regular vertical grid.
 
         Race results place one ``+N`` cluster per row, so cluster y
@@ -262,7 +319,7 @@ class RaceResultDetector:
         """
         if len(starts) < _PLUS_MIN_CLUSTERS:
             return 0
-        period = frame_h * _ROW_SPACING_FRACTION
+        period = frame_h * spacing
         tolerance = max(8.0, period * 0.13)
         best_count = 0
         for base in starts:
@@ -321,18 +378,20 @@ class RaceResultDetector:
           varies along each row.
         """
         starts = self._plus_cluster_starts(frame)
-        if len(starts) < _PLUS_MIN_CLUSTERS:
-            return False
-        on_grid = self._plus_clusters_on_grid(starts, frame.shape[0])
-        if (
-            on_grid < _PLUS_MIN_CLUSTERS
-            or on_grid / len(starts) < _PLUS_GRID_MIN_RATIO
-        ):
-            return False
-        return (
-            self._has_bar_transitions(frame)
-            and self._has_uniform_bar_rows(frame)
-        )
+        if len(starts) >= _PLUS_MIN_CLUSTERS:
+            on_grid = self._plus_clusters_on_grid(starts, frame.shape[0])
+            if (on_grid >= _PLUS_MIN_CLUSTERS and
+                    on_grid / len(starts) >= _PLUS_GRID_MIN_RATIO and
+                    self._has_bar_transitions(frame) and
+                    self._has_uniform_bar_rows(frame)):
+                return True
+        # The 12-player colored board puts its +points outside the older
+        # generic strip. Its solid team bars and compact yellow +point
+        # lettering supply an independent, non-OCR result signal.
+        from mktracker.detection.team_results import _bands, _layout_shift, _plus_rows
+        bands = _bands(frame)
+        return (len(bands) >= 3 and
+                _plus_rows(frame, bands, _layout_shift(frame, bands)) >= 2)
 
     # ------------------------------------------------------------------
     # Word extraction and row parsing

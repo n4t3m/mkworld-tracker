@@ -44,6 +44,21 @@ def test_clear_alternative_can_resolve_a_short_bad_read():
     assert races[0].placements == [[1, "Vy Will"]]
 
 
+def test_repeated_result_marker_overrules_preview_prime_without_losing_name_case():
+    races = [VideoRace(i, preview_players=["Vy’ Fishii", "Vy Will", "Ly Bert"])
+             for i in range(12)]
+    for index, race in enumerate(races):
+        race.placements = [
+            [1, "Vy² Fishii"],
+            [2, "Vy² will" if index < 6 else "Vy² Will"],
+            [3, "Ly Bert"],
+        ]
+    assert reconcile_names(races) == 6
+    assert all(dict(race.placements)[1] == "Vy² Fishii" for race in races)
+    assert all(dict(race.placements)[2] == "Vy² Will" for race in races)
+    assert reconcile_names(races) == 0
+
+
 def test_repeated_result_spelling_resolves_short_name_without_preview():
     races = [VideoRace(i) for i in range(5)]
     for race in races[:4]:
@@ -112,6 +127,46 @@ def test_highlighted_player_uses_digit_spelling_seen_in_two_races():
     assert [dict(race.placements)[rank] for race, rank in zip(races, ranks)] == ["L1am"] * 4
 
 
+def test_partial_result_uses_digit_alternative_after_highlighted_reconciliation():
+    races = [VideoRace(i) for i in range(5)]
+    for index, race in enumerate(races):
+        race.placements = [[1, ["L1am", "L1am", "L1am", "Liam", "Llam"][index]]]
+        race.placements += [[rank, f"Player{rank}"]
+                            for rank in range(2, 16 if index == 4 else 25)]
+        race.highlighted_rank = 1 if index < 4 else None
+        race.placement_evidence = {"1": {"status": "review",
+                                          "alternatives": ["L1am"] if index == 4 else []}}
+    assert reconcile_names(races) == 2
+    assert [race.placements[0][1] for race in races] == ["L1am"] * 5
+    assert races[4].placement_evidence["1"]["raw_name"] == "Llam"
+    assert reconcile_names(races) == 0
+
+
+def test_fixed_room_uses_repeated_lyco_spelling_for_initial_i_l_alias():
+    races = [VideoRace(i) for i in range(5)]
+    for index, race in enumerate(races):
+        name = ["lyco", "lyco", "Iyco", "Visitor4", "Visitor5"][index]
+        race.placements = [[1, name]] + [
+            [rank, f"Player{rank}"] for rank in range(2, 25)]
+    assert reconcile_names(races) == 1
+    assert races[2].placements[0] == [1, "lyco"]
+    assert races[2].placement_evidence["1"]["raw_name"] == "Iyco"
+    assert races[2].placement_evidence["1"]["status"] == "review"
+    assert reconcile_names(races) == 0
+
+
+def test_cooccurring_initial_i_l_names_stay_separate():
+    races = [VideoRace(i) for i in range(5)]
+    for index, race in enumerate(races):
+        name = "lyco" if index < 2 else "Iyco" if index == 2 else f"Visitor{index}"
+        race.placements = [[1, name]] + [
+            [rank, f"Player{rank}"] for rank in range(2, 25)]
+    races[2].placements[23][1] = "lyco"
+    reconcile_names(races)
+    assert races[2].placements[0] == [1, "Iyco"]
+    assert races[2].placements[23] == [24, "lyco"]
+
+
 def test_result_roster_inference_does_not_change_12_player_session():
     races = [VideoRace(i) for i in range(5)]
     for race in races[:4]:
@@ -121,6 +176,21 @@ def test_result_roster_inference_does_not_change_12_player_session():
         [12, "Polar Sear"]]
     assert reconcile_names(races) == 0
     assert races[4].placements[-1] == [12, "Polar Sear"]
+
+
+def test_long_12_player_room_repairs_one_corrupt_name_but_keeps_substitute():
+    races = [VideoRace(i) for i in range(12)]
+    for race in races:
+        race.placements = [[rank, f"Player{rank}"] for rank in range(1, 11)] + [
+            [11, "Vy Fishii"], [12, "Vy Will"]]
+    races[0].placements[-1][1] = "Vy WHIII"
+    races[3].placements[0][1] = "Toadette"
+    assert reconcile_names(races) == 1
+    assert races[0].placements[-1] == [12, "Vy Will"]
+    assert races[0].placement_evidence["12"]["raw_name"] == "Vy WHIII"
+    assert races[0].placement_evidence["12"]["status"] == "review"
+    assert races[3].placements[0] == [1, "Toadette"]
+    assert reconcile_names(races) == 0
 
 
 def test_complete_24_player_roster_resolves_two_unique_variants():

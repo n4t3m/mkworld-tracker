@@ -113,7 +113,7 @@ def test_open_pause_and_click_timeline_preserves_analysis(video, tmp_path, monke
 
 def test_course_banner_excludes_previous_course_in_free_roam():
     from pathlib import Path
-    from mktracker.video_analysis import read_course, has_result_table
+    from mktracker.video_analysis import read_course, has_result_table, has_race_point_differentials
     fixture_dir = Path(__file__).parent / "fixtures" / "video_analysis"
     frame = lambda name: cv2.resize(cv2.imread(str(fixture_dir / name)), (1920, 1080))
     assert read_course(frame("course-preview.jpg")) == "Dandelion Depths"
@@ -123,9 +123,213 @@ def test_course_banner_excludes_previous_course_in_free_roam():
     assert has_result_table(frame("race-results-dark-24p.jpg"))
     assert has_result_table(frame("race-results-dark-24p-partial.jpg"))
     assert has_result_table(frame("race-results-dark-24p-tail.jpg"))
+    assert has_race_point_differentials(frame("race-results-dark-24p.jpg"))
+    assert not has_race_point_differentials(frame("overall-standings-colored-12p.jpg"))
     assert not has_result_table(frame("result-animation.jpg"))
     assert not has_result_table(frame("ghost-valley-false-results.jpg"))
     assert not has_result_table(frame("previous-course.jpg"))
+
+
+def test_model_result_grid_reads_both_24p_pages_without_legacy_name_ocr(monkeypatch):
+    from pathlib import Path
+    import pytesseract
+    from mktracker.detection.race_results import RaceResultDetector
+
+    fixture_dir = Path(__file__).parent / "fixtures" / "video_analysis"
+    reads = []
+    original = pytesseract.image_to_data
+    def counted(*args, **kwargs):
+        reads.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(pytesseract, "image_to_data", counted)
+    detector = RaceResultDetector()
+    for file, expected in (("race-results-dark-24p.jpg", range(1, 14)),
+                           ("race-results-dark-24p-partial.jpg", range(14, 25))):
+        frame = cv2.resize(cv2.imread(str(fixture_dir / file)), (1920, 1080))
+        result = detector.detect(frame, teams=True, model_only=True)
+        assert result["type"] == "race"
+        assert list(result["row_centers"]) == list(expected)
+        assert result["results"] == []
+    assert len(reads) <= 4  # One rank sheet and at most one pinned-row digit per page.
+    pinned = cv2.imread(str(fixture_dir / "race-results-dark-12p-pinned.jpg"))
+    pinned_result = detector.detect(pinned, teams=True, model_only=True)
+    assert pinned_result["type"] == "race"
+    assert 4 in pinned_result["row_centers"]
+    for file in ("result-animation.jpg", "ghost-valley-false-results.jpg"):
+        frame = cv2.resize(cv2.imread(str(fixture_dir / file)), (1920, 1080))
+        assert detector.detect(frame, teams=True, model_only=True) is None
+
+
+def test_model_result_grid_reads_colored_12p_without_legacy_name_ocr(monkeypatch):
+    from pathlib import Path
+    import pytesseract
+    from mktracker.detection.race_results import RaceResultDetector
+    from mktracker.video_analysis import _colored_room_size
+
+    fixture_dir = Path(__file__).parent / "fixtures"
+    reads = []
+    original = pytesseract.image_to_data
+    def counted(*args, **kwargs):
+        reads.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(pytesseract, "image_to_data", counted)
+    frame = cv2.imread(str(fixture_dir / "team_results" / "race-1.jpg"))
+    result = RaceResultDetector().detect(frame, teams=True, model_only=True)
+    assert result["type"] == "race"
+    assert list(result["row_centers"]) == list(range(1, 13))
+    assert result["results"] == []
+    assert result["name_crop_x"] == (.68, .89)
+    assert _colored_room_size(result) == 12
+    assert len(reads) == 1
+
+
+def test_dark_scroll_gap_recovers_tail_seen_between_half_second_samples():
+    from collections import deque
+    from pathlib import Path
+    from mktracker.detection.name_consensus import PlacementConsensus
+    from mktracker.detection.name_model import NameModelReader
+    from mktracker.detection.race_results import RaceResultDetector
+    from mktracker.video_analysis import _fill_dark_scroll_gaps
+
+    if not NameModelReader.available():
+        pytest.skip("No local dark checkpoint configured")
+    fixture_dir = Path(__file__).parent / "fixtures" / "video_analysis"
+    middle = cv2.imread(str(fixture_dir / "dandelion-24p-scroll-middle.jpg"))
+    tail = cv2.imread(str(fixture_dir / "dandelion-24p-scroll-tail.jpg"))
+    assert middle is not None and tail is not None
+    reader = NameModelReader()
+    detector = RaceResultDetector()
+    try:
+        grid = detector.detect(middle, teams=True, model_only=True,
+                               dark_model=reader, rank_only=True)
+        votes = PlacementConsensus()
+        votes.add(reader.read(middle, grid), frame_id=1)
+        assert 24 not in dict(votes.placements())
+        assert _fill_dark_scroll_gaps(
+            votes, deque([(2, tail)], maxlen=8), set(), detector, reader)
+        names = dict(votes.placements())
+        assert names[23] == "SKaR"
+        assert names[24] == "luce"
+    finally:
+        reader.close()
+
+
+def test_model_rank_reader_avoids_tesseract_on_result_grids(monkeypatch):
+    from pathlib import Path
+    import pytesseract
+    from mktracker.detection.race_results import RaceResultDetector
+
+    class RankReader:
+        def predict_crops(self, crops):
+            return [(str(index), .99) for index in range(1, len(crops) + 1)]
+
+    def unexpected_tesseract(*args, **kwargs):
+        raise AssertionError("Result rank OCR called Tesseract")
+
+    monkeypatch.setattr(pytesseract, "image_to_data", unexpected_tesseract)
+    fixture_dir = Path(__file__).parent / "fixtures" / "video_analysis"
+    for filename, model in (("race-results-dark-24p.jpg", "dark_model"),
+                            ("race-results-colored-12p-vy-tags.jpg", "color_model")):
+        frame = cv2.imread(str(fixture_dir / filename))
+        result = RaceResultDetector().detect(frame, teams=True, model_only=True,
+                                             **{model: RankReader()})
+        assert result is not None and result["type"] == "race"
+        assert list(result["row_centers"]) == list(range(1, len(result["row_centers"]) + 1))
+
+
+def test_three_team_dark_24p_result_uses_right_score_column():
+    from pathlib import Path
+    from mktracker.detection.race_results import RaceResultDetector
+    from mktracker.video_analysis import has_race_point_differentials, has_result_table
+
+    # EXwtxrNsdvE at 3:31; this room's 81px grid and right-side +points
+    # differ from the bundled 77px dark-result fixtures.
+    fixture = Path(__file__).parent / "fixtures" / "video_analysis" / "race-results-dark-3team-24p.jpg"
+    frame = cv2.imread(str(fixture))
+    result = RaceResultDetector().detect(frame, teams=True, model_only=True)
+    assert result is not None and result["type"] == "race"
+    assert list(result["row_centers"]) == list(range(1, 14))
+    assert has_result_table(frame)
+    assert has_race_point_differentials(frame)
+
+
+def test_four_team_colored_24p_result_keeps_yellow_and_green_rows():
+    from pathlib import Path
+    from mktracker.detection.race_results import RaceResultDetector
+    from mktracker.video_analysis import _colored_room_size, has_race_point_differentials, has_result_table
+
+    # t2MFiGRmP-g at 2:41: red, blue, yellow and green rows all contribute
+    # to the 24-player result grid. Its bars are shifted left of the 12p table.
+    fixture = Path(__file__).parent / "fixtures" / "video_analysis" / "race-results-colored-4team-24p.jpg"
+    frame = cv2.imread(str(fixture))
+    result = RaceResultDetector().detect(frame, teams=True, model_only=True)
+    assert result is not None and result["type"] == "race"
+    assert list(result["row_centers"]) == list(range(1, 13))
+    assert result["name_crop_x"][0] < .66
+    assert _colored_room_size(result) == 24
+    assert has_result_table(frame)
+    assert has_race_point_differentials(frame)
+
+
+def test_cached_quarter_frame_fills_one_scrolling_24p_rank():
+    from collections import deque
+    from pathlib import Path
+    from mktracker.detection.name_consensus import PlacementConsensus
+    from mktracker.detection.race_results import RaceResultDetector
+    from mktracker.video_analysis import _fill_colored_scroll_gaps
+
+    fixture = Path(__file__).parent / "fixtures" / "video_analysis" / "race-results-colored-4team-rank15.jpg"
+    frame = cv2.imread(str(fixture))
+    votes = PlacementConsensus()
+    votes.add({"type": "race", "results": [(rank, f"Name{rank}")
+                                          for rank in range(1, 25) if rank != 15]})
+
+    class Reader:
+        calls = 0
+        def read(self, frame, grid):
+            self.calls += 1
+            return {"type": "race", "results": [(15, "Monty Mole")],
+                    "confidences": {15: 90}}
+
+    reader = Reader()
+    buffer = deque([(1, frame)], maxlen=8)
+    assert _fill_colored_scroll_gaps(votes, buffer, RaceResultDetector(), reader)
+    assert dict(votes.placements())[15] == "Monty Mole"
+    assert reader.calls == 1
+    assert not _fill_colored_scroll_gaps(votes, buffer, RaceResultDetector(), reader)
+    assert reader.calls == 1
+
+
+def test_dark_quarter_frame_recovers_tail_before_recording_cuts_away():
+    from collections import deque
+    from pathlib import Path
+    from mktracker.detection.name_consensus import PlacementConsensus
+    from mktracker.detection.race_results import RaceResultDetector
+    from mktracker.video_analysis import _fill_dark_scroll_gaps
+
+    # In the full 24p recording, ranks 23–24 are visible at 9:20.75 but the
+    # next half-second sample has already scrolled past them.
+    fixture = Path(__file__).parent / "fixtures" / "video_analysis" / "race-results-dark-24p-quarter-tail.jpg"
+    frame = cv2.imread(str(fixture))
+    votes = PlacementConsensus()
+    votes.add({"type": "race", "results": [(rank, f"Name{rank}")
+                                          for rank in range(1, 23)]})
+
+    class Reader:
+        calls = 0
+        def read(self, frame, grid):
+            self.calls += 1
+            return {"type": "race", "results": [(23, "SKaR"), (24, "luce")],
+                    "confidences": {23: 95, 24: 95}}
+
+    reader = Reader()
+    examined = set()
+    buffer = deque([(1, frame)], maxlen=8)
+    assert _fill_dark_scroll_gaps(votes, buffer, examined, RaceResultDetector(), reader)
+    assert dict(votes.placements())[23] == "SKaR"
+    assert dict(votes.placements())[24] == "luce"
+    assert not _fill_dark_scroll_gaps(votes, buffer, examined, RaceResultDetector(), reader)
+    assert reader.calls == 1
 
 
 def test_analysis_sequences_two_races_without_duplicate_finishes(video, tmp_path, monkeypatch):
@@ -148,7 +352,7 @@ def test_analysis_sequences_two_races_without_duplicate_finishes(video, tmp_path
 
     monkeypatch.setattr(analysis.cv2, "VideoCapture", lambda _: Frames())
     monkeypatch.setattr(analysis.TrackSelectDetector, "has_player_panel", lambda f: int(f[0, 0, 0]) in (1, 3))
-    monkeypatch.setattr(analysis, "read_course", lambda f: "Acorn Heights" if f[0, 0, 0] == 1 else "Peach Stadium")
+    monkeypatch.setattr(analysis, "read_course", lambda f, reader=None: "Acorn Heights" if f[0, 0, 0] == 1 else "Peach Stadium")
     monkeypatch.setattr(analysis.RaceFinishDetector, "is_active", lambda self, f: f[0, 0, 0] == 2)
     monkeypatch.setattr(analysis, "has_result_table", lambda f: False)
     monkeypatch.setattr(analysis.RaceResultDetector, "has_race_results", lambda self, f: False)
@@ -159,11 +363,96 @@ def test_analysis_sequences_two_races_without_duplicate_finishes(video, tmp_path
     assert VideoTimeline.load(str(video), 100) == timeline
 
 
+def test_analysis_starts_next_race_from_trained_countdown_course_card(
+    video, tmp_path, monkeypatch,
+):
+    import mktracker.video_analysis as analysis
+
+    monkeypatch.chdir(tmp_path)
+
+    class Frames:
+        index = -1
+
+        def isOpened(self): return True
+        def get(self, prop):
+            return 2 if prop == cv2.CAP_PROP_FPS else 160
+        def grab(self):
+            self.index += 1
+            return self.index < 160
+        def retrieve(self):
+            t = self.index / 2
+            marker = 2 if 5 <= t < 6 else 3 if 30 <= t < 31 else 0
+            return True, np.full((18, 32, 3), marker, np.uint8)
+        def release(self): pass
+
+    class Reader:
+        disabled = False
+
+        @staticmethod
+        def available(): return True
+        @staticmethod
+        def color_available(): return False
+        def close(self): pass
+
+    monkeypatch.setattr(analysis.cv2, "VideoCapture", lambda _: Frames())
+    monkeypatch.setattr(analysis, "NameModelReader", Reader)
+    monkeypatch.setattr(analysis.TrackSelectDetector, "has_player_panel",
+                        lambda _frame: False)
+    monkeypatch.setattr(analysis, "read_race_start_card_model",
+                        lambda frame, _reader: (
+                            ("SNES Ghost Valley 2", .99)
+                            if frame[0, 0, 0] == 3 else None))
+    monkeypatch.setattr(analysis.RaceFinishDetector, "is_active",
+                        lambda _self, frame: frame[0, 0, 0] == 2)
+    monkeypatch.setattr(analysis.RaceResultDetector, "detect",
+                        lambda *_args, **_kwargs: None)
+    timeline = analysis.analyze_video(str(video))
+    assert [(race.track, race.start, race.finish) for race in timeline.races] == [
+        ("Unknown course", 0, 5),
+        ("SNES Ghost Valley 2", 30, None),
+    ]
+
+
 def test_cancelled_analysis_is_not_marked_complete(video, tmp_path, monkeypatch):
     from mktracker.video_analysis import analyze_video
     monkeypatch.chdir(tmp_path)
     timeline = analyze_video(str(video), cancelled=lambda: True)
     assert not timeline.complete
+
+
+def test_short_result_clip_creates_review_race_without_finish(video, tmp_path, monkeypatch):
+    """A downloaded result-only clip has no finish banner to anchor a race."""
+    from types import SimpleNamespace
+    import mktracker.video_analysis as analysis
+
+    monkeypatch.chdir(tmp_path)
+    class Frames:
+        index = -1
+        def isOpened(self): return True
+        def get(self, prop):
+            return 10 if prop == cv2.CAP_PROP_FPS else 80 if prop == cv2.CAP_PROP_FRAME_COUNT else 0
+        def grab(self):
+            self.index += 1
+            return self.index < 40
+        def retrieve(self): return True, np.full((180, 320, 3), 120, np.uint8)
+        def release(self): pass
+
+    monkeypatch.setattr(analysis.cv2, "VideoCapture", lambda _: Frames())
+    monkeypatch.setattr(analysis.RaceFinishDetector, "is_active", lambda self, _: False)
+    monkeypatch.setattr(analysis.TrackSelectDetector, "has_player_panel", lambda _: False)
+    monkeypatch.setattr(analysis, "has_result_table", lambda _: True)
+    monkeypatch.setattr(analysis, "has_race_point_differentials", lambda _: True)
+    monkeypatch.setattr(analysis, "RaceResultDetector", lambda: SimpleNamespace(
+        detect=lambda frame, teams: {"type": "race", "results": [(1, "Player1"), (2, "Player2")]}))
+    monkeypatch.setattr(analysis.NameModelReader, "available", lambda: False)
+
+    timeline = analysis.analyze_video(str(video))
+    assert timeline.complete
+    assert timeline.duration == pytest.approx(4)
+    assert len(timeline.races) == 1
+    assert timeline.races[0].finish is None
+    assert timeline.races[0].results is not None
+    assert timeline.races[0].placements == [[1, "Player1"], [2, "Player2"]]
 
 
 def test_background_analysis_updates_window(video, tmp_path, monkeypatch):
@@ -315,6 +604,7 @@ def test_name_refresh_waits_through_one_misclassified_standings_frame(video, tmp
         def release(self): pass
     monkeypatch.setattr(analysis.cv2, "VideoCapture", lambda _: Capture())
     monkeypatch.setattr(analysis, "has_result_table", lambda _: True)
+    monkeypatch.setattr(analysis.NameModelReader, "available", lambda: False)
     partial = {"type": "race", "results": [(1, "Player1")], "confidences": {1: 90}}
     full = {"type": "race", "results": [(1, "Player1"), (2, "Player2")], "confidences": {1: 90, 2: 90}}
     overall = {"type": "overall", "results": [(1, "Wrong standings order")]}
@@ -325,6 +615,29 @@ def test_name_refresh_waits_through_one_misclassified_standings_frame(video, tmp
     assert timeline.races[0].placements == [[1, "Player1"], [2, "Player2"]]
     assert timeline.races[0].placement_evidence["2"]["frames"] == 2
     assert detector.detect.call_count == 7
+
+
+def test_refresh_names_reads_result_only_clip(video, tmp_path, monkeypatch):
+    import mktracker.video_analysis as analysis
+    monkeypatch.chdir(tmp_path)
+    timeline = VideoTimeline.create(str(video), 4)
+    timeline.races = [VideoRace(0, "Result clip", results=1.5)]
+    samples = []
+    def sample(cap, start, end, *, cancelled):
+        samples.append((start, end))
+        for t in (1.5, 2.0):
+            yield t, np.full((180, 320, 3), 120, np.uint8)
+    monkeypatch.setattr(analysis, "_sample_window", sample)
+    monkeypatch.setattr(analysis, "has_result_table", lambda _: True)
+    monkeypatch.setattr(analysis.TrackSelectDetector, "has_player_panel", lambda _: False)
+    monkeypatch.setattr(analysis.RaceResultDetector, "detect", lambda self, frame, teams: {
+        "type": "race", "results": [(1, "Player1"), (2, "Player2")]})
+    monkeypatch.setattr(analysis.NameModelReader, "available", lambda: False)
+
+    analysis.refresh_names(timeline)
+    assert samples == [(1.0, 4)]
+    assert timeline.races[0].finish is None
+    assert timeline.races[0].placements == [[1, "Player1"], [2, "Player2"]]
 
 
 def test_review_displays_frame_agreement_and_uncertainty(video, tmp_path, monkeypatch):

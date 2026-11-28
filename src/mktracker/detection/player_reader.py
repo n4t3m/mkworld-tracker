@@ -37,6 +37,9 @@ class PlayerInfo:
 class PlayerReader:
     """Reads player names from the track-selection screen."""
 
+    def __init__(self, name_reader=None) -> None:
+        self._name_reader = name_reader
+
     def read_players(
         self, frame: np.ndarray, *, teams: bool = False
     ) -> list[PlayerInfo]:
@@ -56,6 +59,35 @@ class PlayerReader:
         left_col, right_col = self._find_columns(gray, rows, h, w)
         if left_col is None:
             return []
+
+        if self._name_reader is not None and not self._name_reader.disabled:
+            crops = []
+            for ry1, ry2 in rows:
+                for column in (left_col, right_col):
+                    if column is None:
+                        continue
+                    cx1, cx2 = column
+                    width = cx2 - cx1
+                    if width < 20:
+                        continue
+                    inner = gray[ry1 + _CELL_PAD_Y:ry2 - _CELL_PAD_Y, cx1:cx2]
+                    if inner.size == 0 or float(np.max(inner)) < 80:
+                        continue
+                    x1 = cx1 + int(width * _AVATAR_SKIP)
+                    x2 = x1 + int((cx2 - x1) * _SCORE_CROP)
+                    crop = frame[ry1 + _CELL_PAD_Y:ry2 - _CELL_PAD_Y, x1:x2]
+                    if crop.size:
+                        crops.append(crop)
+            reads = self._name_reader.predict_crops(crops)
+            if reads:
+                model_players = []
+                for raw, confidence in reads:
+                    if confidence < .5:
+                        continue
+                    cleaned = _clean_name(_clean_name(raw.rstrip(" >)]}")))
+                    if cleaned:
+                        model_players.append(PlayerInfo(name=cleaned))
+                return model_players
 
         players: list[PlayerInfo] = []
         for ry1, ry2 in rows:

@@ -7,7 +7,9 @@ logic that the history view already displays.
 
 from __future__ import annotations
 
-from mktracker.match_record import MatchSettingsRecord, RaceRecord
+from mktracker.match_record import (
+    FinalStandings, MatchSettingsRecord, PlayerPlacement, RaceRecord, TeamGroup,
+)
 
 # Mario Kart scoring tables: points awarded for each finishing position
 # in a 12-player race (sum=82) and a 24-player race (sum=144).
@@ -33,6 +35,153 @@ TEAM_COUNTS: dict[str, int] = {
     "Three Teams": 3,
     "Four Teams": 4,
 }
+
+TEAM_COLOR_ORDER: dict[str, tuple[str, ...]] = {
+    "Two Teams": ("red", "blue"),
+    "Three Teams": ("red", "blue", "yellow"),
+    "Four Teams": ("red", "blue", "yellow", "green"),
+}
+
+
+def _team_label(names: list[str], color: str) -> tuple[str, str | None]:
+    """Use a shared short clan tag only when most players support it."""
+    candidates = {name.split(" ", 1)[0] for name in names if " " in name}
+    matches = [(sum(name.startswith(tag) for name in names), tag)
+               for tag in candidates if 1 <= len(tag) <= 8]
+    support, tag = max(matches, default=(0, ""))
+    tag = tag if support >= 3 and support / len(names) >= .8 else None
+    return tag or color.title(), tag
+
+
+def local_final_standings(
+    rows: list[tuple[int, int, str, int]], teams_setting: str,
+    player_count: int,
+) -> FinalStandings | None:
+    """Keep the model's final-card columns as team groups.
+
+    Each column is one team; scores establish global place across columns.
+    Incomplete cards are left for the existing fallback instead of inventing
+    missing players or team totals. Equal scores receive the same competition
+    rank, as on the no-team game card.
+    """
+    if teams_setting == "No Teams" and 1 <= player_count <= 24:
+        columns = 1 if player_count <= 12 else 2
+        column_sizes = ([player_count] if columns == 1 else
+                        [(player_count + 1) // 2, player_count // 2])
+        by_cell = {(column, row): (name, score)
+                   for column, row, name, score in rows}
+        if (len(rows) != player_count or len(by_cell) != player_count or
+                any((column, row) not in by_cell
+                    for column, size in enumerate(column_sizes)
+                    for row in range(size))):
+            return None
+        ordered = [by_cell[column, row]
+                   for column, size in enumerate(column_sizes)
+                   for row in range(size)]
+        if (len({name for name, _ in ordered}) != player_count or
+                any(ordered[index][1] < ordered[index + 1][1]
+                    for index in range(player_count - 1))):
+            return None
+        ranks = {}
+        for index, (_, score) in enumerate(ordered, 1):
+            ranks.setdefault(score, index)
+        return FinalStandings(
+            mode="no_teams",
+            players=[PlayerPlacement(place=ranks[score], name=name, score=score)
+                     for name, score in ordered],
+            teams=None,
+        )
+
+    colors = TEAM_COLOR_ORDER.get(teams_setting)
+    if (colors is None or len(rows) != player_count or
+            player_count not in (12, 24)):
+        return None
+    columns_per_team = 2 if teams_setting == "Two Teams" and player_count == 24 else 1
+    column_count = len(colors) * columns_per_team
+    if player_count % column_count:
+        return None
+    per_column = player_count // column_count
+    by_cell = {(column, row): (name, score)
+               for column, row, name, score in rows}
+    if len(by_cell) != player_count or any(
+        (column, row) not in by_cell
+        for column in range(column_count) for row in range(per_column)
+    ):
+        return None
+    ordered = sorted(rows, key=lambda item: (-item[3], item[0], item[1]))
+    ranks = {}
+    for index, (_, _, _, score) in enumerate(ordered, 1):
+        ranks.setdefault(score, index)
+    placements = {
+        (column, row): PlayerPlacement(place=ranks[score], name=name, score=score)
+        for column, row, name, score in ordered
+    }
+    team_cells = [[(column, row)
+                   for column in range(team_index * columns_per_team,
+                                       (team_index + 1) * columns_per_team)
+                   for row in range(per_column)]
+                  for team_index in range(len(colors))]
+    totals = [sum(by_cell[cell][1] for cell in cells) for cells in team_cells]
+    high = max(totals)
+    labels = [_team_label([placements[cell].name for cell in cells], color)
+              for cells, color in zip(team_cells, colors)]
+    groups = []
+    for team_index, (cells, color) in enumerate(zip(team_cells, colors)):
+        players = [placements[cell] for cell in cells]
+        label, tag = labels[team_index]
+        if tag and sum(other_tag == tag for _, other_tag in labels) > 1:
+            label, tag = color.title(), None
+        groups.append(TeamGroup(
+            name=label, tag=tag, points=totals[team_index],
+            winner=totals[team_index] == high, players=players,
+        ))
+    return FinalStandings(
+        mode=teams_setting.lower().replace(" ", "_"),
+        players=sorted(placements.values(), key=lambda player: player.place),
+        teams=groups,
+    )
+
+
+def local_race_teams(
+    placements: list[tuple[int, str]], colors_by_place: dict[int, str],
+    teams_setting: str,
+) -> dict | None:
+    """Build structured teams from model names and the game-coloured bars.
+
+    Return ``None`` when a placement lacks an unambiguous configured colour.
+    Race points come from the fixed game scoring table, so no score OCR or
+    model arithmetic is needed.
+    """
+    colors = TEAM_COLOR_ORDER.get(teams_setting)
+    if colors is None or len(placements) not in DERIVED_PLAYER_COUNTS:
+        return None
+    if any(colors_by_place.get(place) not in colors for place, _ in placements):
+        return None
+    groups = {color: [] for color in colors}
+    for place, name in placements:
+        groups[colors_by_place[place]].append((place, name))
+    if any(not group for group in groups.values()):
+        return None
+    player_count = len(placements)
+    points = {
+        color: sum(points_for_place(place, player_count) for place, _ in group)
+        for color, group in groups.items()
+    }
+    highest = max(points.values())
+    labels = {color: _team_label([name for _, name in groups[color]], color)
+              for color in colors}
+    structured = []
+    for color in colors:
+        group = groups[color]
+        label, tag = labels[color]
+        if tag and sum(other_tag == tag for _, other_tag in labels.values()) > 1:
+            label, tag = color.title(), None
+        structured.append({
+            "name": label, "tag": tag,
+            "race_points": points[color], "race_winner": points[color] == highest,
+            "players": [{"place": place, "name": name} for place, name in group],
+        })
+    return {"mode": teams_setting.lower().replace(" ", "_"), "teams": structured}
 
 
 def points_for_place(place: int, player_count: int = 12) -> int:

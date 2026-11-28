@@ -138,6 +138,29 @@ class TestDebugDisabled:
         # Single race in a 4-race match → next is WAITING_FOR_TRACK_PICK.
         assert sm._state is GameState.WAITING_FOR_TRACK_PICK
 
+    def test_colored_board_waits_through_short_plus_sign_gap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        from mktracker.detection import team_results
+
+        sm = _setup_in_results_state(tmp_path, debug_mode=False)
+        calls: list[None] = []
+        _stub_finalise(monkeypatch, calls)
+        monkeypatch.setattr(team_results, "_bands", lambda _frame: [(1, 2)] * 3)
+        now = [0.0]
+        monkeypatch.setattr(sm_mod.time, "monotonic", lambda: now[0])
+        _script_has_results(
+            monkeypatch, sm, [True, False, False, True, False, False, False, False],
+        )
+        for tag, second in enumerate((0, 1, 2, 2.5, 3, 4, 5)):
+            now[0] = second
+            sm._handle_reading_results_gemini(_frame(tag))
+            assert sm._state is GameState.READING_RACE_RESULTS
+        now[0] = 6
+        sm._handle_reading_results_gemini(_frame(7))
+        assert sm._state is GameState.WAITING_FOR_TRACK_PICK
+        assert calls == [None]
+
 
 # ---------------------------------------------------------------------------
 # debug_mode=True: pre-placement rolling buffer

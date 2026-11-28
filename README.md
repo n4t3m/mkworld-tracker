@@ -100,11 +100,20 @@ The program utilizes the Tesseract binary for OCR. It must be installed separate
 - **macOS**: `brew install tesseract`
 - **Linux**: `sudo apt install tesseract-ocr` (or your distro's equivalent)
 
-If Tesseract is not on `PATH` and not at the default Windows location, the GUI will launch but OCR detection will throw `TesseractNotFoundError` on the first frame and the program becomes effectively unusable.
+Install Tesseract even when using trained checkpoints: it remains the fallback
+for layouts the local models do not recognize and for several glyph checks.
 
 ### Gemini API key (optional but strongly recommended)
 
-The app uses a mix of OCR (via Tesseract) and Gemini models to detect game state. Tesseract handles the always-on detectors (match settings, track name, player names); Gemini, when configured, replaces OCR for race rank, race results, and final standings — all of which are noticeably more reliable with the LLM.
+The app uses local OCR and, when configured, Gemini to detect game state.
+Configured trained checkpoints handle many local text fields; Tesseract handles
+unrecognized layouts and systems without those checkpoints. Live race rank uses
+the dark checkpoint with local HUD-shape corroboration; Gemini handles frames
+without a reliable local rank when an API key is configured. Race results use trained
+readers first for 12-player two-team and 24-player team or no-team rooms with a full
+roster; complete, roster-checked final cards do likewise. The 24-player
+final-card model runs in the background for no-team and two-, three-, or
+four-team rooms. Incomplete or unsupported reads use Gemini.
 
 The Gemini models we use are **free** on Google AI Studio's free tier. Grab a key from [Google AI Studio](https://aistudio.google.com/app/apikey) and paste it into the **Settings** tab in the app; it'll be persisted to a local `.env` file. Without a key, the app still runs but falls back to OCR for everything.
 
@@ -190,6 +199,9 @@ Click an entry once to pause and jump to that moment. Course preview timestamps
 mark the map/player-list screen, not the starting gun. Boundaries are sampled
 every half second. Player-name OCR is a draft and may be incomplete or wrong;
 the result-screen entry lets you inspect the footage directly.
+Short clips containing only a race result screen appear as **Result clip** entries
+even when the finish banner and course preview are outside the file. **Refresh
+Names** works on these clips too.
 Name OCR is tuned for a 1920×1080 source. Video Review shows a resolution
 notice for smaller recordings because upscaling a 720p copy cannot restore
 the fine lettering lost during capture or compression.
@@ -198,9 +210,10 @@ Selecting a timeline entry also shows that race's detected names in the results
 panel. **Refresh Names** re-reads just the saved race result windows and updates
 that panel, with progress counted by race. It keeps your race timestamps and
 playback position. The local team-results reader isolates name and placement
-columns, samples the scrolling table every half second, and combines repeated
-readings. Decorative clan symbols and occasional similar letters can still be
-misread; names remain OCR drafts.
+columns, samples the scrolling table up to four times per second, and combines
+repeated readings. A configured trained name model reads each located row;
+without it, Video Review uses the existing OCR reader. Decorative clan symbols
+and occasional similar letters can still be misread; names remain OCR drafts.
 After a complete scan or **Refresh Names**, names repeated across several
 course previews can resolve clear spelling errors in result rows. The original
 OCR reading remains available in the result tooltip, and uncertain matches
@@ -246,11 +259,70 @@ The font stays at the selected local path; its path is stored in the ignored
 integration tests use that setting (or the environment variable of the same
 name) and skip when no local reference font is available.
 
+### Trained local OCR
+
+The trained PaddleOCR recognizer reads names and ranks on dark race-result
+screens during initial video analysis and **Refresh Names**. A separate colored
+checkpoint handles colored result screens and preview rosters; set
+`NAME_OCR_COLOR_CONFIG` and `NAME_OCR_COLOR_CHECKPOINT` to enable it. The colored model's
+reads are checked against visible tag symbols and word spacing across the
+board; ambiguous raised symbols remain marked for review. A complete colored
+12-player board can stop sampling once each name has three supporting frames.
+Video Review also stops reading a 12-player course-preview roster once two
+frames establish all 12 names, reducing repeated model work during full scans.
+The configured checkpoints also read course selections, room settings, live
+player lists, and final-standings names and scores. Yellow and green match
+standings use the colored checkpoint when available.
+Video Review can also start a race from the trained model's read of the
+countdown course card when the recording cuts away before the map preview.
+The card must match a known course; its timestamp is treated as a sampled
+race boundary. A real three-team
+24-player race screen uses dark result bars, which the dark-model path detects
+with its wider score column and row spacing. A separate four-team per-race
+screen uses all four colored bars; its shifted grid now reaches the optional
+colored model. The configured game font can check a few ambiguous `0/O` and
+`1/I` result glyphs; short-name and dotted-initial corrections are marked
+for review. Names remain drafts across recording conditions.
+Set `NAME_OCR_PYTHON` to a separate Python executable with PaddlePaddle
+installed, `NAME_OCR_PADDLEOCR` to the PaddleOCR source directory,
+`NAME_OCR_CONFIG` to the trained YAML config, and `NAME_OCR_CHECKPOINT` to its
+`.pdparams` file. Put these paths in the ignored `.env` file or environment;
+`.env.example` lists the keys. The config's `character_dict_path` must also
+point to the model's character list. The app keeps one worker loaded per
+configured checkpoint while reading result frames.
+If a checkpoint is unavailable or a screen layout is not recognized, the
+existing OCR reader remains available. Live rank checks the trained dark model
+against the visible HUD shape, using the local shape read when the model misses
+and Gemini when no reliable local HUD rank is present. Across the two local
+VODs, the local route read all 24 finish frames at the capture timing; the 11
+24-player ranks with independent result-screen labels agreed. 12-player two-team and 24-player
+team or no-team race boards can use the local model first with complete roster
+evidence. Dark 24-player team boards without visible color bars continue to
+the existing results reader. Complete 12-player two-team final cards also use
+the local model.
+No-team final cards use the dark model when every name agrees with a complete
+prior race roster; obscured or partial cards continue to the existing fallback. The
+Match History table-regeneration action also tries a roster-checked local model
+read from its saved screenshot before using Gemini when configured. The
+race-placement regeneration action does the same for verified 12-player
+two-team, 24-player colored-team, and 24-player no-team saved result frames; incomplete reads retain
+the Gemini fallback when an API key is configured. The
+local model path handles the other live text and the no-key race and match
+results. On complete colored team boards, the local path also
+preserves team membership and calculates race and final team totals; partial
+boards keep the existing flat result fallback.
+
 ### OCR development probes
 
 Run these from the repository root after installing the dependencies. They are
 developer scripts, excluded from the installed application. Inputs and output
 directories are explicit; generated files under `analysis/` are ignored by Git.
+
+The labeled name-crop corpus, training scripts, and held-out evaluation log live
+in the separate private [mkworld-tracker-ocr](https://github.com/n4t3m/mkworld-tracker-ocr)
+repository. This tracker contains
+the runtime readers and screen-level regression fixtures; it runs without the
+training checkout. Install selected checkpoints separately as described above.
 
 Inspect result names at selected recording timestamps (in seconds):
 

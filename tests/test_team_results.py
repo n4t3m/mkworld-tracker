@@ -22,6 +22,29 @@ def plain(text):
     return re.sub(r"[^a-z0-9]", "", text.lower().replace("γ", "y"))
 
 
+@pytest.mark.parametrize("filename,expected", [
+    ("race-results-colored-12p-vy-tags.jpg",
+     ["red", "blue", "blue", "blue", "red", "red", "blue", "red", "blue", "red", "red", "blue"]),
+    ("race-results-colored-4team-24p.jpg",
+     ["red", "blue", "red", "yellow", "green", "green", "green", "red", "blue", "yellow", "green", "yellow"]),
+])
+def test_colored_result_bars_identify_teams(filename, expected):
+    from mktracker.detection.team_results import _bands, _layout_shift, _band_team_color
+
+    frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "video_analysis" / filename))
+    assert frame is not None
+    bands = _bands(frame)
+    shift = _layout_shift(frame, bands)
+    assert [_band_team_color(frame, band, shift) for band in bands] == expected
+
+
+def test_colored_12p_race_board_has_fast_results_signal():
+    frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "video_analysis" /
+                           "race-results-colored-12p-vy-tags.jpg"))
+    assert frame is not None
+    assert RaceResultDetector().has_race_results(frame)
+
+
 def test_full_table_keeps_names_and_explicit_ranks():
     result = read("race-1.jpg")
     assert result["type"] == "race"
@@ -227,8 +250,56 @@ def test_dark_short_name_recovers_from_compression_edge():
 
 def test_preview_reader_ignores_obscuring_voice_chat_labels():
     from mktracker.detection.preview_roster import read_preview_names
+    from mktracker.detection.name_model import NameModelReader
+    if not NameModelReader.color_available():
+        pytest.skip("Optional colored name model is not configured")
     frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "video_analysis" / "preset-course.png"))
-    names = read_preview_names(frame)
+    reader = NameModelReader(color=True)
+    try:
+        names = read_preview_names(frame, reader)
+    finally:
+        reader.close()
     assert any("azusa" in name.casefold() for name, confidence in names)
     assert any("barrett" in name.casefold() for name, confidence in names)
     assert not any("impact player" in name.casefold() for name, confidence in names)
+
+
+def test_preview_reader_uses_model_and_excludes_voice_chat_overlay():
+    from mktracker.detection.preview_roster import read_preview_names
+
+    class Reader:
+        def __init__(self):
+            self.count = 0
+
+        def predict_crops(self, crops):
+            self.count = len(crops)
+            return [("Player", .9) for _ in crops]
+
+    frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "video_analysis" / "preset-course.png"))
+    reader = Reader()
+    names = read_preview_names(frame, reader)
+    assert reader.count == 11  # The obscured twelfth bar is not a player name.
+    assert len(names) == 11
+    assert all(name == "Player" and confidence == 90 for name, confidence in names)
+
+
+def test_preview_roster_stops_after_two_complete_twelve_slot_frames():
+    from mktracker.detection.preview_roster import PreviewRoster
+
+    class Reader:
+        disabled = False
+
+        def predict_crops(self, crops):
+            return [(f"Player{i:02d}", .9) for i in range(len(crops))]
+
+    frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "video_analysis" /
+                           "course-preview.jpg"))
+    assert frame is not None
+    roster = PreviewRoster(Reader())
+    roster.add(frame)
+    assert not roster.complete()
+    second = frame.copy()
+    second[0, 0, 0] ^= 1
+    roster.add(second)
+    assert len(roster.names()) == 12
+    assert roster.complete()

@@ -17,6 +17,72 @@ def _similar(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b, autojunk=False).ratio()
 
 
+def _recover_supported_alternatives(races) -> int:
+    """Use a same-row alternative after other races establish its spelling."""
+    support = Counter(name for race in races for name in
+                      {name for _, name in race.placements})
+    changes = 0
+    for race in races:
+        present = {name for _, name in race.placements}
+        for rank, displayed in race.placements:
+            evidence = race.placement_evidence.get(str(rank), {})
+            if evidence.get("status") != "review" or support[displayed] > 3:
+                continue
+            options = [name for name in set(evidence.get("alternatives", []))
+                       if support[name] >= 4 and name not in present
+                       and _similar(_key(displayed), _key(name)) >= .4]
+            if len(options) != 1:
+                continue
+            candidate = options[0]
+            for row in race.placements:
+                if row[0] == rank:
+                    row[1] = candidate
+                    break
+            evidence.setdefault("raw_name", displayed)
+            evidence["session_match"] = {"name": candidate,
+                                         "result_races": support[candidate]}
+            present.add(candidate)
+            changes += 1
+    return changes
+
+
+def _reconcile_initial_i_l(races) -> int:
+    """Resolve a short I/l visual alias from repeated fixed-room results."""
+    if sum(len(race.placements) >= 20 for race in races) < 4:
+        return 0
+    support = Counter(name for race in races for name in
+                      {name for _, name in race.placements})
+    changes = 0
+    for source, count in support.items():
+        if len(source) < 3 or source[0] not in "Il" or count > 2:
+            continue
+        candidate = ("l" if source[0] == "I" else "I") + source[1:]
+        if support[candidate] < max(2, 2 * count):
+            continue
+        if any({source, candidate} <= {name for _, name in race.placements}
+               for race in races):
+            continue
+        for race in races:
+            present = {name for _, name in race.placements}
+            if candidate in present:
+                continue
+            for rank, displayed in race.placements:
+                if displayed != source:
+                    continue
+                for row in race.placements:
+                    if row[0] == rank:
+                        row[1] = candidate
+                        break
+                evidence = race.placement_evidence.setdefault(str(rank), {})
+                evidence.setdefault("raw_name", displayed)
+                evidence["session_match"] = {"name": candidate,
+                                             "result_races": support[candidate],
+                                             "font_alias": "I/l"}
+                evidence["status"] = "review"
+                changes += 1
+    return changes
+
+
 def _roster(races) -> list[tuple[str, str, int]]:
     counts: Counter[str] = Counter()
     result_counts: Counter[str] = Counter()
@@ -61,6 +127,21 @@ def _roster(races) -> list[tuple[str, str, int]]:
                     if all(ord(c) < 128 for c in name if c.isalpha()) and count >= 2]
         options = readable or variants
         name = max(options, key=lambda item: (item[1], len(_key(item[0]))))[0]
+        # Preview OCR often renders a tiny raised team ² as a prime or drops
+        # it. Restore it only when independent result screens repeatedly read
+        # the same identity with that marker. Keep the preview's clearer
+        # spelling of the actual player name after the tag.
+        raised = [(candidate, count) for candidate, count in result_counts.items()
+                  if (_key(candidate) == best_spelling and len(candidate) >= 4
+                      and candidate[:2].casefold() == name[:2].casefold()
+                      and candidate[2] == "²")]
+        raised_support = sum(count for _, count in raised)
+        if raised_support >= max(4, (support + 1) // 2) and len(name) >= 4:
+            tail = name[2:].lstrip(" ²'’′")
+            if tail:
+                separated = sum(count for candidate, count in raised
+                                if candidate[3] == " ")
+                name = name[:2] + "²" + (" " if separated * 2 >= raised_support else "") + tail
         roster.append((best_spelling, name, support))
     return roster
 
@@ -108,35 +189,58 @@ def reconcile_names(races) -> int:
                                              "preview_races": support}
                 evidence["status"] = "review"
                 changes += 1
+    # A long 12-player room supplies its own roster evidence. Repair one
+    # visibly corrupted spelling only when eleven other identities still
+    # match and that player's name recurs across nearly every race. A genuine
+    # substitute with a different name stays as read.
+    complete_12p = [race for race in races if len(race.placements) == 12]
+    if len(complete_12p) >= 8 and len(complete_12p) == len(races):
+        counts = Counter(_key(name) for race in races for _, name in race.placements)
+        variants: dict[str, Counter[str]] = {}
+        for race in races:
+            for _, name in race.placements:
+                variants.setdefault(_key(name), Counter())[name] += 1
+        stable = {key: variants[key].most_common(1)[0][0]
+                  for key, count in counts.items()
+                  if count >= max(7, len(races) - 2) and len(key) >= 4}
+        if len(stable) == 12:
+            for race in races:
+                present = {_key(name) for _, name in race.placements}
+                missing = set(stable) - present
+                extra = [(rank, name) for rank, name in race.placements
+                         if _key(name) not in stable]
+                if len(missing) != 1 or len(extra) != 1:
+                    continue
+                target = missing.pop()
+                rank, displayed = extra[0]
+                key = _key(displayed)
+                if ("".join(c for c in key if c.isdecimal()) !=
+                        "".join(c for c in target if c.isdecimal())):
+                    continue
+                score = _similar(key, target)
+                # The other stable identities already occupy the other eleven
+                # rows, so similarity to one of them cannot identify this row.
+                if score < .6:
+                    continue
+                candidate = stable[target]
+                for row in race.placements:
+                    if row[0] == rank:
+                        row[1] = candidate
+                        break
+                evidence = race.placement_evidence.setdefault(str(rank), {})
+                evidence.setdefault("raw_name", displayed)
+                evidence["session_match"] = {"name": candidate,
+                                             "similarity": round(score, 3),
+                                             "result_races": counts[target]}
+                evidence["status"] = "review"
+                changes += 1
     if sum(len(race.placements) >= 20 for race in races) < 4:
         return changes
     # The 24-player layout often has no readable course-preview roster.
     # A spelling independently selected in several races can still settle a
     # noisy row when that exact spelling was also read as an alternative at
     # the same rank. Keep these corrections marked for review.
-    support = Counter(name for race in races for name in
-                      {name for _, name in race.placements})
-    for race in races:
-        present = {name for _, name in race.placements}
-        for rank, displayed in race.placements:
-            evidence = race.placement_evidence.get(str(rank), {})
-            if evidence.get("status") != "review" or support[displayed] > 3:
-                continue
-            options = [name for name in set(evidence.get("alternatives", []))
-                       if support[name] >= 4 and name not in present
-                       and _similar(_key(displayed), _key(name)) >= .4]
-            if len(options) != 1:
-                continue
-            candidate = options[0]
-            for row in race.placements:
-                if row[0] == rank:
-                    row[1] = candidate
-                    break
-            evidence.setdefault("raw_name", displayed)
-            evidence["session_match"] = {"name": candidate,
-                                         "result_races": support[candidate]}
-            present.add(candidate)
-            changes += 1
+    changes += _recover_supported_alternatives(races)
     support = Counter(name for race in races for name in
                       {name for _, name in race.placements})
     stable: dict[str, tuple[str, int]] = {}
@@ -360,10 +464,15 @@ def reconcile_names(races) -> int:
             evidence["status"] = "review"
             present.add(candidate)
             changes += 1
+    changes += _reconcile_initial_i_l(races)
     final_support = Counter(name for race in races for name in
                             {name for _, name in race.placements})
     for race in races:
         for rank, name in race.placements:
             if final_support[name] < 4:
                 race.placement_evidence.setdefault(str(rank), {})["status"] = "review"
+    # Earlier passes can raise a spelling's support from three to four.
+    # A partial result page cannot use the complete-roster recovery above,
+    # so revisit its directly observed alternatives once with final support.
+    changes += _recover_supported_alternatives(races)
     return changes

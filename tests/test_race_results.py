@@ -13,6 +13,7 @@ import cv2
 import pytest
 
 from mktracker.detection.race_results import RaceResultDetector
+from mktracker.detection.name_model import NameModelReader
 
 # ---- PB race fixtures (first-place player name starts with ">€>") ----
 _PB_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "race_results")
@@ -111,6 +112,52 @@ def detector():
 _NEG_DIR = os.path.join(
     os.path.dirname(__file__), "fixtures", "race_results_negative",
 )
+
+
+def test_trained_reader_reads_no_team_result_rows():
+    """The local no-team path should use model ranks and names, including short tags."""
+    if not NameModelReader.available():
+        pytest.skip("No local trained checkpoint configured")
+    reader = NameModelReader()
+    try:
+        for directory, filename, first_name, last_name in (
+            (_DAN_DIR, "frame_09.png", "KT", "ProTime"),
+            (_KTB_DIR, "frame_09.png", "TDB", "viti"),
+        ):
+            frame = cv2.imread(os.path.join(directory, filename))
+            assert frame is not None
+            grid = RaceResultDetector().detect(
+                frame, model_only=True, dark_model=reader,
+            )
+            assert grid is not None
+            result = reader.read(frame, grid)
+            names = dict(result["results"])
+            assert len(names) == 12
+            assert first_name.lower() in names[1].lower()
+            assert last_name.lower() in names[12].lower()
+            rank_grid = RaceResultDetector().detect(
+                frame, model_only=True, dark_model=reader, rank_only=True,
+            )
+            assert rank_grid is not None
+            assert "_model_name_predictions" not in rank_grid
+            rank_results = reader.read(frame, rank_grid)
+            assert len(rank_results["results"]) == 12
+    finally:
+        reader.close()
+
+
+def test_result_grid_keeps_short_name_slots():
+    """A one-letter name can be absent from legacy OCR yet still have a row."""
+    for directory, filename, rank in (
+        (_DAN_DIR, "frame_09.png", 10),
+        (_DDJ_DIR, "frame_12a.png", 11),
+    ):
+        frame = cv2.imread(os.path.join(directory, filename))
+        if frame is None:
+            pytest.skip("Result-board fixture not found")
+        result = RaceResultDetector().detect(frame, teams=True)
+        assert result is not None and result["type"] == "race"
+        assert rank in result["row_centers"]
 
 
 def _load_frames(data_dir, filenames):

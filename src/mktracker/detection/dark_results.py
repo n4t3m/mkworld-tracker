@@ -91,13 +91,16 @@ def _highlighted_band(frame: np.ndarray) -> tuple[int, int] | None:
     return bands[0]
 
 
-def read_highlighted_row(frame: np.ndarray) -> tuple[int, str, float, float] | None:
-    """Read the yellow player row, which can stay pinned during scrolling."""
-    band = _highlighted_band(frame)
-    if band is None:
-        return None
+def _highlighted_rank(frame: np.ndarray, band: tuple[int, int], reader=None) -> tuple[int, float] | None:
     h, w = frame.shape[:2]
     a, b = band
+    if reader is not None:
+        crop = frame[a+4:b-6, int(w*.573):int(w*.612)]
+        reads = reader.predict_crops([crop])
+        if not reads:
+            return None
+        text, confidence = reads[0]
+        return (int(text), confidence * 100) if text.isdigit() and 1 <= int(text) <= 24 else None
     rank_cell = cv2.cvtColor(frame[a+4:b-6, int(w*.573):int(w*.612)], cv2.COLOR_BGR2GRAY)
     rank_binary = cv2.threshold(rank_cell, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
     rank_binary = cv2.resize(rank_binary, None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC)
@@ -108,13 +111,27 @@ def read_highlighted_row(frame: np.ndarray) -> tuple[int, str, float, float] | N
                   for i, word in enumerate(rank_data["text"]) if word.strip()]
     if len(rank_reads) != 1:
         return None
-    rank_text, rank_confidence = rank_reads[0]
+    rank_text, confidence = rank_reads[0]
     if not rank_text.isdigit() or not 1 <= int(rank_text) <= 24:
         return None
+    return int(rank_text), confidence
+
+
+def read_highlighted_row(frame: np.ndarray) -> tuple[int, str, float, float] | None:
+    """Read the yellow player row, which can stay pinned during scrolling."""
+    band = _highlighted_band(frame)
+    if band is None:
+        return None
+    h, w = frame.shape[:2]
+    a, b = band
+    read = _highlighted_rank(frame, band)
+    if read is None:
+        return None
+    rank, rank_confidence = read
     name, confidence = _ocr(frame[a:b, int(w*.66):int(w*.83)])
     if len(name) < 2 or confidence < 20:
         return None
-    return int(rank_text), name, confidence, rank_confidence
+    return rank, name, confidence, rank_confidence
 
 
 def add_highlighted_row(result: dict, frame: np.ndarray) -> dict:
@@ -143,10 +160,128 @@ def add_highlighted_row(result: dict, frame: np.ndarray) -> dict:
     return result
 
 
-def read_dark_results(frame: np.ndarray, starts: list[int]) -> dict | None:
+def read_dark_grid_for_model(frame: np.ndarray, starts: list[int],
+                             *, step: int | None = None, rank_reader=None,
+                             rank_only: bool = False) -> dict | None:
+    """Locate dark-table ranks, using the model when one is configured."""
+    h, w = frame.shape[:2]
+    step = step or round(h * 77 / 1080)
+    tolerance = max(8, round(step * .17))
+    if len(starts) < 4:
+        return None
+    phases = [y % step for y in starts]
+    phase = max(phases, key=lambda p: sum(min(abs(q-p), step-abs(q-p)) <= tolerance for q in phases))
+    matching = [y for y in starts if min(abs(y % step-phase), step-abs(y % step-phase)) <= tolerance]
+    if len(matching) < 4:
+        return None
+    offsets = [((y - phase + step // 2) % step) - step // 2 for y in matching]
+    phase = round((phase + np.median(offsets)) % step)
+
+    rows = []
+    cells = []
+    rank_crops = []
+    for index, y in enumerate(range(phase, h, step)):
+        top, bottom = max(0, y - round(step * .42)), min(h, y + round(step * .56))
+        if bottom - top < step * .6:
+            continue
+        cell = frame[top:bottom, int(w*.575):int(w*.615)]
+        if rank_reader is not None:
+            rank_crops.append(cell)
+            rows.append((index, y))
+            continue
+        binary = (cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY) <= 160).astype(np.uint8) * 255
+        scale = min(120 / binary.shape[0], 140 / binary.shape[1])
+        binary = cv2.resize(binary, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        top_pad = (160 - binary.shape[0]) // 2
+        cells.append(cv2.copyMakeBorder(binary, top_pad, 160 - binary.shape[0] - top_pad,
+                                        10, 160 - binary.shape[1] - 10,
+                                        cv2.BORDER_CONSTANT, value=255))
+        rows.append((index, y))
+    if not rows:
+        return None
+    readings = []
+    model_names = None
+    pinned_read = None
+    if rank_reader is not None:
+        name_crops = ([] if rank_only else [
+            frame[max(0, round(y - h * 24 / 1080)):min(h, round(y + h * 36 / 1080)),
+                  round(w * 1267 / 1920):round(w * 1667 / 1920)]
+            for _, y in rows])
+        band = _highlighted_band(frame)
+        pinned_crop = ([frame[band[0]+4:band[1]-6, int(w*.573):int(w*.612)]]
+                       if band is not None else [])
+        if getattr(rank_reader, "supports_narrow_ranks", False):
+            narrow = rank_reader.predict_crops(rank_crops + pinned_crop, width=64)
+            names = rank_reader.predict_crops(name_crops, width=320) if name_crops else []
+            predictions = narrow[:len(rows)] + names + narrow[len(rows):]
+        else:
+            predictions = rank_reader.predict_crops(rank_crops + name_crops + pinned_crop)
+        if len(predictions) != len(rows) + len(name_crops) + len(pinned_crop):
+            return None
+        ranks = predictions[:len(rows)]
+        model_names = predictions[len(rows):len(rows) + len(name_crops)] if name_crops else None
+        if pinned_crop:
+            text, confidence = predictions[-1]
+            if text.isdigit() and 1 <= int(text) <= 24:
+                pinned_read = int(text), confidence * 100
+        readings = [(rows[i][0], int(word)) for i, (word, confidence) in enumerate(ranks)
+                    if word.isdigit() and 1 <= int(word) <= 24 and confidence >= .5]
+    else:
+        sheet = np.vstack(cells)
+        data = pytesseract.image_to_data(
+            sheet, config="--psm 6 -c tessedit_char_whitelist=0123456789",
+            output_type=pytesseract.Output.DICT,
+        )
+        for i, word in enumerate(data["text"]):
+            word = word.strip()
+            if not word.isdigit() or float(data["conf"][i]) < 25:
+                continue
+            index = round((data["top"][i] + data["height"][i] / 2) / 160 - .5)
+            rank = int(word)
+            if 0 <= index < len(rows) and 1 <= rank <= 24:
+                readings.append((rows[index][0], rank))
+    origin = rank_origin(readings, min_support=3)
+    if origin is None:
+        return None
+    first, _ = origin
+    observed = [first + index for index, y in rows
+                if 1 <= first + index <= 24
+                and any(abs(y - plus) <= tolerance for plus in matching)]
+    if len(observed) < 5 and not (len(observed) >= 3 and min(observed, default=0) >= 8
+                                  and max(observed, default=0) - min(observed, default=0) >= 2):
+        return None
+    centers = {first + index: y for index, y in rows
+               if 1 <= first + index <= 24}
+    result = {"type": "race", "results": [], "row_centers": centers}
+    precomputed = ({first + index: model_names[i] for i, (index, _) in enumerate(rows)
+                    if 1 <= first + index <= 24} if model_names is not None else None)
+    band = _highlighted_band(frame)
+    if band and centers:
+        middle = (band[0] + band[1]) / 2
+        nearest = min(centers, key=lambda rank: abs(centers[rank] - middle))
+        if abs(centers[nearest] - middle) <= h * .035:
+            read = pinned_read if rank_reader is not None else _highlighted_rank(frame, band)
+            # The pinned player row can replace a normal rank at the bottom
+            # of the page; its printed rank overrides the inferred grid slot.
+            if read is not None and read[1] >= 50:
+                rank, _ = read
+                if rank != nearest:
+                    center = centers.pop(nearest)
+                    centers[rank] = center
+                    if precomputed is not None:
+                        precomputed[rank] = precomputed.pop(nearest)
+                result["highlighted_rank"] = rank
+                result["highlighted_rank_source"] = "ocr_confident"
+    if precomputed is not None:
+        result["_model_name_predictions"] = precomputed
+    return result
+
+
+def read_dark_results(frame: np.ndarray, starts: list[int],
+                      *, step: int | None = None) -> dict | None:
     """Infer the visible rank grid from repeated +points, then OCR each row."""
     h, w = frame.shape[:2]
-    step = round(h * 77 / 1080)
+    step = step or round(h * 77 / 1080)
     tolerance = max(8, round(step * .17))
     if len(starts) < 4:
         return None
@@ -191,7 +326,16 @@ def read_dark_results(frame: np.ndarray, starts: list[int]) -> dict | None:
             confidences[rank] = confidence
     if len(results) < 5:
         return None
+    read_ranks = {rank for rank, _ in results}
     centers = {first + index: phase + index * step for index, *_ in rows
-               if 1 <= first + index <= 24}
+               if 1 <= first + index <= 24
+               and (first + index in read_ranks or
+                    any(abs(phase + index * step - observed) <= tolerance
+                        for observed in matching))}
+    if centers:
+        # A short name can disappear from both text OCR and the +point
+        # detector. Keep the interior rank slot between observed rows.
+        centers.update({rank: phase + (rank - first) * step
+                        for rank in range(min(centers), max(centers) + 1)})
     return {"type": "race", "results": results, "confidences": confidences,
             "row_centers": centers}

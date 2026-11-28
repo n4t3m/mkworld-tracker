@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import pytesseract
 
+from mktracker.detection.course_model import read_course_banner_model
 from mktracker.detection.tracks import course_text_candidates, match_track_name
 
 logger = logging.getLogger(__name__)
@@ -82,8 +83,9 @@ class TrackSelectDetector:
     the cooldown after a successful match.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, name_reader=None) -> None:
         self._last_match_time: float = 0.0
+        self._name_reader = name_reader
 
     @staticmethod
     def has_player_panel(frame: np.ndarray) -> bool:
@@ -157,6 +159,8 @@ class TrackSelectDetector:
         Factory + Starview Peak), versus the track-select screen which only
         shows the single selected banner.
         """
+        if self._name_reader is not None and not self._name_reader.disabled:
+            return read_course_banner_model(frame, self._name_reader)
         h, w = frame.shape[:2]
         roi = frame[:, int(w * _RIGHT_REGION_X) :]
         roi_up = cv2.resize(

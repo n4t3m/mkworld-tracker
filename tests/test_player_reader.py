@@ -8,6 +8,7 @@ import cv2
 import pytest
 
 from mktracker.detection.player_reader import PlayerReader
+from mktracker.detection.name_model import NameModelReader
 
 FIXTURES_DIR = os.path.join(
     os.path.dirname(__file__),
@@ -34,6 +35,20 @@ EXPECTED_PLAYERS = [
 ]
 
 PLAYER_FILES = sorted(glob.glob(os.path.join(FIXTURES_DIR, "race_*_players.png")))
+
+
+@pytest.mark.skipif(not NameModelReader.available(), reason="Optional local model is unavailable")
+def test_trained_model_reads_every_saved_track_roster():
+    model = NameModelReader()
+    try:
+        reader = PlayerReader(model)
+        for image_path in PLAYER_FILES:
+            names = [player.name for player in reader.read_players(cv2.imread(image_path), teams=True)]
+            assert len(names) == 12, (image_path, names)
+            assert all(_name_matches(name, expected)
+                       for name, expected in zip(names, EXPECTED_PLAYERS)), (image_path, names)
+    finally:
+        model.close()
 
 
 def _name_matches(detected: str, expected: str) -> bool:

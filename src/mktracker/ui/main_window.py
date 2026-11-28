@@ -8,7 +8,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QFont, QFontDatabase, QImage, QPixmap
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
@@ -388,13 +388,15 @@ class MainWindow(QMainWindow):
         self._analysis_progress.hide()
         outer.addWidget(self._analysis_progress)
         self._timeline_list = QListWidget()
-        self._timeline_list.setMaximumHeight(180)
+        self._timeline_list.setMinimumHeight(220)
+        self._timeline_list.setMaximumHeight(280)
         self._timeline_list.setToolTip("Click a race to review its course preview; click a Finish or Results entry to jump there.")
         self._timeline_list.itemClicked.connect(self._review_timeline_item)
         result_row = QHBoxLayout()
-        result_row.addWidget(self._timeline_list, stretch=3)
+        result_row.addWidget(self._timeline_list, stretch=2)
         self._names_group = QGroupBox("Detected results (OCR)")
-        self._names_group.setMaximumHeight(180)
+        self._names_group.setMinimumHeight(220)
+        self._names_group.setMaximumHeight(280)
         names_layout = QVBoxLayout(self._names_group)
         self._names_list = QListWidget()
         names_layout.addWidget(self._names_list)
@@ -555,9 +557,12 @@ class MainWindow(QMainWindow):
         width, height = self._capture.resolution
         resolution_note = (f" · {width}×{height} source; name OCR may be less accurate below 1080p"
                            if width < 1920 or height < 1080 else "")
-        self._analysis_status.setText(f"{state} · {len(t.races)} races{resolution_note} · Click an entry to review. Course preview times are sampled; OCR results need review.")
+        preview_note = ("Course preview times are sampled; "
+                        if any(race.track != "Result clip" for race in t.races) else "")
+        self._analysis_status.setText(f"{state} · {len(t.races)} races{resolution_note} · Click an entry to review. {preview_note}OCR results need review.")
         for number, race in enumerate(t.races, 1):
-            entries = [(race.start, f"Race {number} · {race.track} · Course preview")]
+            entries = [(race.start, f"Race {number} · Result clip" if race.track == "Result clip" else
+                        f"Race {number} · {race.track} · Course preview")]
             if race.finish is not None:
                 entries.append((race.finish, f"    Race {number} · Finish"))
             if race.results is not None:
@@ -597,7 +602,10 @@ class MainWindow(QMainWindow):
                     self._game_font_family = families[0] if families else None
                     self._registered_game_font = font_path
                 if self._game_font_family:
-                    item.setFont(QFont(self._game_font_family, self._names_list.font().pointSize()))
+                    game_font = QFont(self._game_font_family)
+                    game_font.setPixelSize(16)
+                    item.setFont(game_font)
+                    item.setSizeHint(QSize(0, 25))
             if evidence:
                 session_match = evidence.get("session_match") or {}
                 if "preview_races" in session_match:
@@ -1374,6 +1382,7 @@ class MainWindow(QMainWindow):
         self._timer.stop()
         self._live_timer.stop()
         self._stop_video_analysis()
+        self._state_machine.close()
         self._capture.close()
         self._live_capture.close()
         super().closeEvent(event)

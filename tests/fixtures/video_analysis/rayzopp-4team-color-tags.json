@@ -1,0 +1,16 @@
+{
+  "image": "overall-standings-colored-human-tags-rayzopp-4team-24p.jpg",
+  "source": "https://www.youtube.com/watch?v=Xi1anFGlza4&t=390s",
+  "layout": "overall standings; direct name-crop OCR diagnostic",
+  "row_centers": [585, 648, 711, 775, 839, 905],
+  "columns": {
+    "yellow": {
+      "x_pixels": [1040, 1430],
+      "names": ["st♪Mikuel", "st Zay", "st Wood", "st Bella", "st awo :3", "st Plunky"]
+    },
+    "green": {
+      "x_pixels": [1505, 1900],
+      "names": ["KT Viti", "KT Dani★", "KT★Grego", "KT Couk", "KT kenjii", "KT broski"]
+    }
+  }
+}

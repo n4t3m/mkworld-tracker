@@ -60,15 +60,16 @@ class FontDecoder:
         self.indices = {c: i for i, c in enumerate(self.chars)}
         self._shape_cache = {}
 
-    def _shape_scores(self, mask: np.ndarray) -> np.ndarray:
+    def _shape_scores(self, mask: np.ndarray, *, aspect_tolerance: float = .35,
+                      force_chars: str = "") -> np.ndarray:
         h, w = mask.shape
         normalized = cv2.resize(mask.astype(np.uint8)*255, (32, 48), interpolation=cv2.INTER_AREA) > 127
-        key = (h, w, np.packbits(normalized).tobytes())
+        key = (h, w, aspect_tolerance, force_chars, np.packbits(normalized).tobytes())
         if key in self._shape_cache:
             return self._shape_cache[key]
-        candidates = np.flatnonzero(np.abs(np.log((w/h)/self.aspects)) <= .35)
+        candidates = np.flatnonzero(np.abs(np.log((w/h)/self.aspects)) <= aspect_tolerance)
         scores = np.full(len(self.chars), -2.0)
-        if not len(candidates):
+        if not len(candidates) and not force_chars:
             return scores
         # Shortlist at low resolution, then compare fine details/diacritics.
         # Multiple raster phases of an alias count separately here, so keep a
@@ -79,6 +80,9 @@ class FontDecoder:
             coarse_score = 2*overlap/np.maximum(1, self.coarse_counts[candidates]+small.sum())
             coarse_score -= .08*np.abs(np.log((w/h)/self.aspects[candidates]))
             candidates = candidates[np.argpartition(coarse_score, -128)[-128:]]
+        if force_chars:
+            candidates = np.union1d(candidates, np.flatnonzero(
+                np.isin(self.chars, list(force_chars))))
         intersection = np.logical_and(self.masks[candidates], normalized).sum(axis=(1, 2))
         dice = 2*intersection/np.maximum(1, self.counts[candidates]+normalized.sum())
         bands = normalized.reshape(4, -1)

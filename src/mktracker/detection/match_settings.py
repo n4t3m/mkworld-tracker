@@ -60,6 +60,9 @@ def _fuzzy(text: str, options: tuple[str, ...]) -> str | None:
 class MatchSettingsDetector:
     """Detects the 'rules decided' screen and extracts match settings."""
 
+    def __init__(self, name_reader=None) -> None:
+        self._name_reader = name_reader
+
     def is_active(self, frame: np.ndarray) -> bool:
         """Fast brightness check — is the white settings card visible?"""
         h, w = frame.shape[:2]
@@ -73,6 +76,12 @@ class MatchSettingsDetector:
         h, w = frame.shape[:2]
         x1, y1, x2, y2 = _BANNER_ROI
         roi = frame[int(h * y1) : int(h * y2), int(w * x1) : int(w * x2)]
+        if self._name_reader is not None and not self._name_reader.disabled:
+            roi = frame[round(h * .94):round(h * .985),
+                        round(w * .34):round(w * .73)]
+            reads = self._name_reader.predict_crops([roi])
+            return bool(reads and reads[0][1] >= .65 and
+                        ("rules" in reads[0][0].casefold() or "decided" in reads[0][0].casefold()))
         roi_up = cv2.resize(
             roi, None, fx=_OCR_SCALE, fy=_OCR_SCALE, interpolation=cv2.INTER_CUBIC
         )
@@ -83,6 +92,26 @@ class MatchSettingsDetector:
 
     def _read_settings(self, frame: np.ndarray) -> MatchSettings | None:
         """OCR the settings card and parse the six setting values."""
+        if self._name_reader is not None and not self._name_reader.disabled:
+            h, w = frame.shape[:2]
+            rows = ((.35, .42), (.425, .5), (.5, .575),
+                    (.575, .65), (.65, .725), (.725, .8))
+            crops = [frame[round(h * top):round(h * bottom),
+                           round(w * .52):round(w * .76)] for top, bottom in rows]
+            reads = self._name_reader.predict_crops(crops)
+            if len(reads) != 6 or any(confidence < .65 for _, confidence in reads):
+                return None
+            values = [name.strip() for name, _ in reads]
+            cc_class = _fuzzy(values[0], _VALID_CLASSES)
+            teams = _fuzzy(values[1], _VALID_TEAMS)
+            items = _fuzzy(values[2], _VALID_ITEMS)
+            com_difficulty = _fuzzy(values[3], _VALID_COM)
+            count = re.search(r"\d+", values[4])
+            intermission = _fuzzy(values[5], _VALID_INTERMISSION)
+            if all((cc_class, teams, items, com_difficulty, count, intermission)):
+                return MatchSettings(cc_class, teams, items, com_difficulty,
+                                     int(count.group()), intermission)
+            return None
         h, w = frame.shape[:2]
         x1, y1, x2, y2 = _SETTINGS_ROI
         roi = frame[int(h * y1) : int(h * y2), int(w * x1) : int(w * x2)]

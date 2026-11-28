@@ -38,6 +38,11 @@ from PySide6.QtWidgets import (
 )
 
 from mktracker.detection.tracks import TRACK_ICONS_DIR, TRACK_IMAGES, TRACK_NAMES
+from mktracker.detection.name_model import NameModelReader
+from mktracker.detection.match_results_model import read_saved_final_standings
+from mktracker.detection.saved_race_model import (
+    read_saved_race_results, saved_race_model_available,
+)
 from mktracker.gemini_client import load_api_key
 from mktracker.gemini_match_results import request_match_results
 from mktracker.gemini_results import request_race_results
@@ -63,6 +68,28 @@ logger = logging.getLogger(__name__)
 
 _ICON_SIZE = 96
 _ICON_CACHE: dict[str, QPixmap] = {}
+
+
+def _latest_complete_roster(record: MatchRecord) -> list[str]:
+    for race in reversed(record.races):
+        for names in ([player.name for player in race.placements], race.players):
+            if names and len(names) == len(set(names)):
+                return list(names)
+    return []
+
+
+def _saved_final_model_available(record: MatchRecord) -> bool:
+    if not _latest_complete_roster(record):
+        return False
+    return (NameModelReader.available() if record.settings.teams == "No Teams"
+            else NameModelReader.color_available())
+
+
+def _race_roster(race: RaceRecord) -> list[str]:
+    for names in (race.players, [player.name for player in race.placements]):
+        if names and len(names) == len(set(names)):
+            return list(names)
+    return []
 
 # Human-readable description of what the state machine is currently doing.
 # Used to render the live status banner in the detail view.  Keyed by
@@ -294,7 +321,7 @@ class _RaceCard(QFrame):
 
         btn = QPushButton("↻  Regenerate")
         btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn.setToolTip("Re-run Gemini against the saved placement_*.png frames")
+        btn.setToolTip("Reread saved placement frames with the trained model, then Gemini if needed")
         self._apply_regenerate_button_style(btn, in_progress=False)
         btn.clicked.connect(
             lambda: self.refetchPlacementsRequested.emit(self._race_number),
@@ -992,11 +1019,10 @@ class _TrackEditDialog(QDialog):
 
 
 class _RefetchConfirmDialog(QDialog):
-    """Preview ``match_results.png`` and confirm before re-running Gemini.
+    """Preview the saved final-card frame before regenerating standings.
 
-    Re-fetching only succeeds when the saved frame actually shows the final
-    CONGRATULATIONS!/NICE TRY!/DRAW! standings screen.  Surfacing the image
-    up front lets the user verify that before spending a Gemini call.
+    The saved frame must show a final standings screen. The user can inspect
+    it before the model read or any fallback API call.
     """
 
     def __init__(self, results_path: Path, parent: QWidget | None = None) -> None:
@@ -1008,12 +1034,13 @@ class _RefetchConfirmDialog(QDialog):
         layout.setSpacing(10)
 
         warning = QLabel(
-            "This will re-run Gemini against the captured match-results frame"
-            " below and overwrite the current table.\n\n"
+            "This will reread the captured match-results frame and overwrite"
+            " the current table. The trained model runs first; Gemini is used"
+            " if configured and the model cannot verify a complete card.\n\n"
             "The frame must show the final results screen"
             " (CONGRATULATIONS!/NICE TRY!/DRAW!). If it shows anything else"
-            " — a mid-race screen, the player list, gameplay — Gemini will"
-            " return garbage or fail."
+            " — a mid-race screen, the player list, gameplay — regeneration"
+            " may fail."
         )
         warning.setWordWrap(True)
         warning.setStyleSheet("QLabel { color: #f0c674; }")
@@ -1052,7 +1079,7 @@ class _RefetchConfirmDialog(QDialog):
 
 
 class _RefetchTableThread(QThread):
-    """Re-runs the Gemini match-results call against ``match_results.png``.
+    """Read saved final standings with the model, then Gemini if needed.
 
     Synchronously bridges the existing fire-and-forget
     :func:`request_match_results` API into a QThread so the caller gets a
@@ -1061,12 +1088,27 @@ class _RefetchTableThread(QThread):
 
     finished = Signal(object)  # parsed dict | None
 
-    def __init__(self, frame, log_dir: Path, parent=None) -> None:
+    def __init__(self, frame, log_dir: Path, *, teams: str,
+                 roster: list[str], use_gemini: bool, parent=None) -> None:
         super().__init__(parent)
         self._frame = frame
         self._log_dir = log_dir
+        self._teams = teams
+        self._roster = roster
+        self._use_gemini = use_gemini
 
     def run(self) -> None:
+        try:
+            local = read_saved_final_standings(
+                self._frame, teams=self._teams, roster=self._roster)
+            if local is not None:
+                self.finished.emit(local)
+                return
+        except Exception:
+            logger.exception("Saved final standings model read failed")
+        if not self._use_gemini:
+            self.finished.emit(None)
+            return
         import threading
         done = threading.Event()
         holder: dict[str, object | None] = {"parsed": None}
@@ -1082,8 +1124,7 @@ class _RefetchTableThread(QThread):
 
 
 class _RefetchPlacementsThread(QThread):
-    """Re-runs the Gemini race-results call against the saved ``placement_*.png``
-    frames for one race.
+    """Reread saved race frames with the model, then Gemini if needed.
 
     Bridges :func:`request_race_results` into a single
     ``finished(parsed)`` Qt signal.
@@ -1099,14 +1140,31 @@ class _RefetchPlacementsThread(QThread):
         parent=None,
         *,
         teams_setting: str | None = None,
+        roster: list[str] | None = None,
+        use_gemini: bool = True,
     ) -> None:
         super().__init__(parent)
         self._frames = frames
         self._race_number = race_number
         self._log_dir = log_dir
         self._teams_setting = teams_setting
+        self._roster = roster or []
+        self._use_gemini = use_gemini
 
     def run(self) -> None:
+        try:
+            local = read_saved_race_results(
+                self._frames, teams=self._teams_setting or "No Teams",
+                roster=self._roster,
+            )
+            if local is not None:
+                self.finished.emit(local)
+                return
+        except Exception:
+            logger.exception("Saved race results model read failed")
+        if not self._use_gemini:
+            self.finished.emit(None)
+            return
         import threading
         done = threading.Event()
         holder: dict[str, object | None] = {"parsed": None}
@@ -1126,11 +1184,9 @@ class _RefetchPlacementsThread(QThread):
 
 
 class _RefetchPlacementsConfirmDialog(QDialog):
-    """Preview the saved placement frames and confirm before re-running Gemini.
+    """Preview the saved placement frames before rereading results.
 
-    The Gemini race-results call only succeeds when the supplied frames show
-    the post-race placement screen — surfacing the carousel up front lets the
-    user verify that.
+    The supplied frames must show the post-race placement screen.
     """
 
     def __init__(
@@ -1158,12 +1214,13 @@ class _RefetchPlacementsConfirmDialog(QDialog):
         layout.addWidget(title)
 
         warning = QLabel(
-            "This will run Gemini against the placement frames captured for"
-            " this race and overwrite any existing placements.\n\n"
+            "This will reread the placement frames captured for this race"
+            " and overwrite any existing placements. The trained model runs"
+            " first; Gemini is used if configured and the model cannot verify"
+            " the complete board.\n\n"
             "The frames must show the post-race results screen (the scrolling"
             " placement bars). If they show anything else — gameplay, the"
-            " track-select map, the player list — Gemini will return"
-            " garbage or fail."
+            " track-select map, the player list — regeneration may fail."
         )
         warning.setWordWrap(True)
         warning.setStyleSheet("QLabel { color: #f0c674; }")
@@ -1231,6 +1288,7 @@ class _MissingTableCard(QFrame):
         *,
         results_available: bool,
         api_key_available: bool,
+        model_available: bool = False,
         final_standings_present: bool = False,
     ) -> None:
         super().__init__()
@@ -1259,7 +1317,7 @@ class _MissingTableCard(QFrame):
             "Edit Table to retry by re-saving."
             if final_standings_present
             else "Final standings were never captured for this match — "
-            "either the Gemini call failed or the match did not reach "
+            "either the results read failed or the match did not reach "
             "the CONGRATULATIONS! screen."
         )
         status = QLabel(status_text)
@@ -1287,13 +1345,12 @@ class _MissingTableCard(QFrame):
         header_row.addWidget(edit_btn)
 
         self._refetch_btn: QPushButton | None = None
-        if results_available and api_key_available:
+        if results_available and (api_key_available or model_available):
             self._refetch_btn = QPushButton("Regenerate Table")
             self._refetch_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             self._refetch_btn.setStyleSheet(btn_style)
             self._refetch_btn.setToolTip(
-                "Re-run Gemini against match_results.png and rebuild "
-                "the final standings",
+                "Reread match_results.png with the trained model, then Gemini if needed",
             )
             self._refetch_btn.clicked.connect(self.refetchRequested.emit)
             header_row.addWidget(self._refetch_btn)
@@ -1328,14 +1385,14 @@ class _MissingTableCard(QFrame):
                 "Open Edit Table and Save (without changing anything) "
                 "to re-render table.png from the saved standings."
             )
-        elif results_available and api_key_available:
+        elif results_available and (api_key_available or model_available):
             hint_text = (
-                "Click Regenerate Table to retry against the saved "
+                "Click Regenerate Table to reread the saved "
                 "match_results.png, or Edit Table to enter standings manually."
             )
-        elif results_available and not api_key_available:
+        elif results_available:
             hint_text = (
-                "match_results.png is saved but no Gemini API key is "
+                "match_results.png is saved but no trained model or Gemini API key is "
                 "configured — set one in Settings to enable Regenerate, "
                 "or use Edit Table to enter standings manually."
             )
@@ -1434,8 +1491,7 @@ class _TableImageCard(QFrame):
                 self._refetch_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
                 self._refetch_btn.setStyleSheet(btn_style)
                 self._refetch_btn.setToolTip(
-                    "Re-run Gemini against match_results.png and rebuild "
-                    "the final standings",
+                    "Reread match_results.png with the trained model, then Gemini if needed",
                 )
                 self._refetch_btn.clicked.connect(self.refetchRequested.emit)
                 header_row.addWidget(self._refetch_btn)
@@ -1613,6 +1669,7 @@ class _MatchTimelinePane(QScrollArea):
         self._race_cards = {}
         match_dir = self._matches_dir / record.match_id
         api_key_available = bool(load_api_key())
+        final_model_available = _saved_final_model_available(record)
 
         if live:
             races_played = len(record.races)
@@ -1663,6 +1720,7 @@ class _MatchTimelinePane(QScrollArea):
                 match_dir=match_dir,
                 results_available=results_path.exists(),
                 api_key_available=api_key_available,
+                model_available=final_model_available,
                 final_standings_present=record.final_standings is not None,
             )
             missing.editRequested.connect(self.editTableRequested.emit)
@@ -1697,7 +1755,8 @@ class _MatchTimelinePane(QScrollArea):
                     live=live,
                     is_in_progress=(race.race_number == current_race_number),
                     match_dir=match_dir,
-                    api_key_available=api_key_available,
+                    api_key_available=(api_key_available or saved_race_model_available(
+                        record.settings.teams, _race_roster(race))),
                 )
                 card.clicked.connect(self.raceSelected.emit)
                 card.refetchPlacementsRequested.connect(
@@ -2468,10 +2527,12 @@ class MatchDetailView(QWidget):
                 f"No match_results.png in {match_dir.name}.",
             )
             return
-        if not load_api_key():
+        api_key_available = bool(load_api_key())
+        model_available = _saved_final_model_available(record)
+        if not (api_key_available or model_available):
             QMessageBox.warning(
                 self, "Refetch failed",
-                "No Gemini API key configured. Set one in the Settings tab.",
+                "No trained OCR model or Gemini API key is configured.",
             )
             return
 
@@ -2489,7 +2550,11 @@ class MatchDetailView(QWidget):
             return
 
         match_id = record.match_id
-        thread = _RefetchTableThread(frame, match_dir, parent=self)
+        thread = _RefetchTableThread(
+            frame, match_dir, teams=record.settings.teams,
+            roster=_latest_complete_roster(record),
+            use_gemini=api_key_available, parent=self,
+        )
         thread.finished.connect(
             lambda parsed: self._on_refetch_finished(match_id, parsed)
         )
@@ -2499,11 +2564,11 @@ class MatchDetailView(QWidget):
 
     def _on_refetch_finished(self, match_id: str, parsed: object) -> None:
         self._timeline.set_refetch_in_progress(False)
-        if not isinstance(parsed, dict):
+        if not isinstance(parsed, (dict, FinalStandings)):
             QMessageBox.warning(
                 self, "Refetch failed",
-                "Gemini did not return a usable response. See "
-                "gemini_match_results.txt in the match folder for details.",
+                "Could not verify complete final standings from the saved frame. "
+                "Check that it shows the final results screen.",
             )
             return
         match_dir = self._matches_dir / match_id
@@ -2515,7 +2580,8 @@ class MatchDetailView(QWidget):
                 f"Could not reload match record:\n{exc}",
             )
             return
-        record.final_standings = final_standings_from_gemini(parsed)
+        record.final_standings = (parsed if isinstance(parsed, FinalStandings)
+                                  else final_standings_from_gemini(parsed))
         if record.completed_at is None:
             record.completed_at = datetime.now().isoformat()
         try:
@@ -2572,10 +2638,13 @@ class MatchDetailView(QWidget):
                 f"No placement_*.png frames in {race_dir.name}.",
             )
             return
-        if not load_api_key():
+        api_key_available = bool(load_api_key())
+        roster = _race_roster(race)
+        if not (api_key_available or
+                saved_race_model_available(record.settings.teams, roster)):
             QMessageBox.warning(
                 self, "Regenerate failed",
-                "No Gemini API key configured. Set one in the Settings tab.",
+                "No trained OCR model or Gemini API key is configured for this race.",
             )
             return
 
@@ -2605,6 +2674,7 @@ class MatchDetailView(QWidget):
         thread = _RefetchPlacementsThread(
             frames, race_number, race_dir, parent=self,
             teams_setting=teams_setting,
+            roster=roster, use_gemini=api_key_available,
         )
         thread.finished.connect(
             lambda parsed: self._on_refetch_placements_finished(
@@ -2622,8 +2692,7 @@ class MatchDetailView(QWidget):
         if not isinstance(parsed, dict):
             QMessageBox.warning(
                 self, "Regenerate failed",
-                "Gemini did not return a usable response. See "
-                "gemini_results.txt in the race folder for details.",
+                "Could not verify complete placements from the saved frames.",
             )
             return
         match_dir = self._matches_dir / match_id
@@ -2650,7 +2719,7 @@ class MatchDetailView(QWidget):
         except (KeyError, TypeError, ValueError) as exc:
             QMessageBox.warning(
                 self, "Regenerate failed",
-                f"Could not interpret Gemini response:\n{exc}",
+                f"Could not interpret results response:\n{exc}",
             )
             return
         existing = record.races[idx]

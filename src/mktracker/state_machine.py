@@ -6,6 +6,7 @@ import logging
 import re
 import threading
 import time
+import unicodedata
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
@@ -14,12 +15,15 @@ import cv2
 import numpy as np
 
 from mktracker.detection.match_results import MatchResultDetector
+from mktracker.detection.match_results_model import reconcile_final_rows
 from mktracker.detection.match_settings import MatchSettings, MatchSettingsDetector
 from mktracker.detection.tracks import TRACK_ICONS_DIR, TRACK_IMAGES
 from mktracker.detection.player_reader import PlayerReader
 from mktracker.detection.race_finish import RaceFinishDetector
-from mktracker.detection.race_rank import RaceRankDetector
+from mktracker.detection.hud_position import HudPositionReader
+from mktracker.detection.hud_rank_model import read_finish_rank
 from mktracker.detection.race_results import RaceResultDetector
+from mktracker.detection.name_model import NameModelReader
 from mktracker.detection.name_consensus import PlacementConsensus
 from mktracker.detection.preview_roster import PreviewRoster
 from mktracker.detection.track_select import TrackSelectDetector
@@ -33,7 +37,9 @@ from mktracker.discord_webhook import (
     load_webhook_url,
     send_message,
 )
-from mktracker.team_scoring import race_team_scores
+from mktracker.team_scoring import (
+    TEAM_COLOR_ORDER, local_final_standings, local_race_teams, race_team_scores,
+)
 from mktracker.gemini_client import load_api_key
 from mktracker.gemini_match_results import request_match_results
 from mktracker.gemini_rank import request_race_rank
@@ -201,6 +207,7 @@ class RaceInfo:
     placements: tuple[tuple[int, str], ...] = ()
     race_rank: int | None = None
     gemini_results: dict | None = None
+    local_results: dict | None = None
 
 
 class GameStateMachine:
@@ -226,14 +233,27 @@ class GameStateMachine:
         self._match_seq: int = 0
         self._pending_track: str | None = None
 
-        self._match_detector = MatchSettingsDetector()
-        self._track_detector = TrackSelectDetector()
-        self._player_reader = PlayerReader()
-        self._preview_roster = PreviewRoster()
+        self._name_model = NameModelReader() if NameModelReader.available() else None
+        self._color_name_model = (NameModelReader(color=True)
+                                  if NameModelReader.color_available() else None)
+        # Race-result OCR runs after the board closes on a background thread.
+        # Give it a separate persistent worker so Live View's preview and
+        # settings reads cannot interleave requests on one Paddle process.
+        self._race_result_model = (NameModelReader(color=True)
+                                   if NameModelReader.color_available() else None)
+        self._race_result_model_lock = threading.Lock()
+        self._dark_race_result_model = (NameModelReader()
+                                        if NameModelReader.available() else None)
+        self._dark_race_result_model_lock = threading.Lock()
+        self._match_detector = MatchSettingsDetector(self._name_model)
+        self._track_detector = TrackSelectDetector(self._name_model)
+        self._player_reader = PlayerReader(self._name_model)
+        self._preview_roster = PreviewRoster(self._color_name_model)
         self._finish_detector = RaceFinishDetector()
-        self._rank_detector = RaceRankDetector()
+        self._hud_rank_reader = HudPositionReader()
         self._result_detector = RaceResultDetector()
-        self._match_result_detector = MatchResultDetector()
+        self._match_result_detector = MatchResultDetector(
+            self._name_model, self._color_name_model)
         self._vote_banner_detector = VoteBannerDetector()
 
         # Lock protecting _races from concurrent writes by Gemini callbacks.
@@ -242,9 +262,15 @@ class GameStateMachine:
         self._race_placements: dict[int, str] = {}
         self._race_placement_quality: dict[int, int] = {}
         self._race_name_votes = PlacementConsensus()
+        self._race_team_color_votes: dict[int, collections.Counter[str]] = {}
         self._race_overall_frames = 0
         self._seen_race_results = False
+        self._colored_results_seen = False
+        self._colored_result_absent_since: float | None = None
         self._result_frames: list[np.ndarray] = []
+        self._model_pre_result_frames: collections.deque[np.ndarray] = collections.deque(
+            maxlen=20,
+        )
         # Debug-mode rolling buffer of frames seen *before* the first
         # placement frame, plus counters for the post-burst capture window.
         self._pre_results_buffer: collections.deque[np.ndarray] = collections.deque(
@@ -254,6 +280,7 @@ class GameStateMachine:
         self._post_results_count: int = 0
         self._match_final_results: list[tuple[str, int]] | None = None
         self._gemini_match_results: dict | None = None
+        self._local_final_standings: FinalStandings | None = None
         self._match_banner_seen_at: float | None = None
 
         # Rolling buffer of (timestamp, frame) tuples seen during
@@ -340,18 +367,23 @@ class GameStateMachine:
         self._current_race = 0
         self._match_completed_at = None
         self._pending_track = None
-        self._preview_roster = PreviewRoster()
+        self._preview_roster = PreviewRoster(self._color_name_model)
         self._race_placements = {}
         self._race_placement_quality = {}
         self._race_name_votes = PlacementConsensus()
+        self._race_team_color_votes = {}
         self._race_overall_frames = 0
         self._seen_race_results = False
+        self._colored_results_seen = False
+        self._colored_result_absent_since = None
         self._result_frames = []
+        self._model_pre_result_frames.clear()
         self._pre_results_buffer.clear()
         self._pre_results_dumped = False
         self._post_results_count = 0
         self._match_final_results = None
         self._gemini_match_results = None
+        self._local_final_standings = None
         self._match_banner_seen_at = None
         self._pre_track_buffer.clear()
 
@@ -369,6 +401,19 @@ class GameStateMachine:
         self._match_seq += 1
         self._track_detector._last_match_time = 0.0
         self._transition(GameState.WAITING_FOR_MATCH)
+
+    def close(self) -> None:
+        """Release persistent local OCR workers when Live View shuts down."""
+        if self._name_model is not None:
+            self._name_model.close()
+        if self._color_name_model is not None:
+            self._color_name_model.close()
+        if self._race_result_model is not None:
+            with self._race_result_model_lock:
+                self._race_result_model.close()
+        if self._dark_race_result_model is not None:
+            with self._dark_race_result_model_lock:
+                self._dark_race_result_model.close()
 
     def start_manual_match(self) -> bool:
         """Mark the current state machine as the start of a manual match
@@ -491,7 +536,7 @@ class GameStateMachine:
         if result is None:
             return
         self._pending_track = result["track_name"]
-        self._preview_roster = PreviewRoster()
+        self._preview_roster = PreviewRoster(self._color_name_model)
         self._preview_roster.add(frame)
         race_num = len(self._races) + 1
         self._save_race_frame(frame, race_num, "track")
@@ -552,9 +597,13 @@ class GameStateMachine:
         self._race_placement_quality = {}
         self._race_name_votes = PlacementConsensus(self._preview_roster.names()
             or (list(self._races[-1].players) if self._races else []))
+        self._race_team_color_votes = {}
         self._race_overall_frames = 0
         self._seen_race_results = False
+        self._colored_results_seen = False
+        self._colored_result_absent_since = None
         self._result_frames = []
+        self._model_pre_result_frames.clear()
         self._pre_results_buffer.clear()
         self._pre_results_dumped = False
         self._post_results_count = 0
@@ -573,20 +622,39 @@ class GameStateMachine:
         self._save_race_frame(frame, len(self._races), "rank")
         logger.info("Race rank frame captured (1s after FINISH)")
 
-        # Fire async Gemini call to determine the user's race placement.
-        # We capture (race_index, match_seq, match_dir) so the callback can
-        # tell whether the state machine has since moved on to a new match
-        # and, if so, route its result to the original match's on-disk record.
+        # Read the finish HUD on a background thread. The callback keeps a
+        # late result attached to the match that produced this frame.
         race_index = len(self._races) - 1
         race_num = race_index + 1
         race_log_dir = self._race_dir(race_num)
-        request_race_rank(
-            frame.copy(), race_num,
-            self._make_rank_callback(race_index, self._match_seq, self._match_dir),
-            log_dir=race_log_dir,
-        )
+        threading.Thread(
+            target=self._read_rank_local_then_fallback,
+            args=(frame.copy(), race_num, race_index,
+                  self._match_seq, self._match_dir, race_log_dir),
+            daemon=True,
+        ).start()
 
         self._transition(GameState.READING_RACE_RESULTS)
+
+    def _read_rank_local_then_fallback(
+        self, frame: np.ndarray, race_num: int, race_index: int,
+        match_seq: int, match_dir: Path | None, log_dir: Path | None,
+    ) -> None:
+        callback = self._make_rank_callback(race_index, match_seq, match_dir)
+        try:
+            reader = self._dark_race_result_model
+            if reader is not None and not reader.disabled:
+                with self._dark_race_result_model_lock:
+                    rank = read_finish_rank(frame, reader, self._hud_rank_reader)
+            else:
+                rank = read_finish_rank(frame, None, self._hud_rank_reader)
+            if rank is not None:
+                logger.info("Race %d: local finish rank %d", race_num, rank)
+                callback(rank)
+                return
+        except Exception:
+            logger.exception("Race %d: local finish-rank read failed", race_num)
+        request_race_rank(frame, race_num, callback, log_dir=log_dir)
 
     def _make_rank_callback(
         self,
@@ -605,7 +673,7 @@ class GameStateMachine:
                     return
                 if race_index < 0 or race_index >= len(self._races):
                     logger.warning(
-                        "Gemini rank callback: race index %d out of range "
+                        "Rank callback: race index %d out of range "
                         "(have %d races)", race_index, len(self._races),
                     )
                     return
@@ -640,6 +708,9 @@ class GameStateMachine:
         has_results = self._result_detector.has_race_results(frame)
 
         if has_results:
+            from mktracker.detection.team_results import _bands
+            self._colored_results_seen |= len(_bands(frame)) >= 3
+            self._colored_result_absent_since = None
             if self.debug_mode and not self._pre_results_dumped:
                 self._dump_pre_placement_buffer()
                 self._pre_results_dumped = True
@@ -651,6 +722,15 @@ class GameStateMachine:
                 "Collected race result frame %d for Gemini", frame_num,
             )
         elif self._seen_race_results:
+            if self._colored_results_seen:
+                now = time.monotonic()
+                if self._colored_result_absent_since is None:
+                    self._colored_result_absent_since = now
+                # Colored +points briefly vanish mid-animation on the local
+                # 12p VOD, then return 2.5 seconds later. Wait for a sustained
+                # absence before finalizing the board.
+                if now - self._colored_result_absent_since < 3.0:
+                    return
             if self.debug_mode and self._post_results_count < _DEBUG_PLACEMENT_CONTEXT:
                 self._post_results_count += 1
                 self._save_post_placement_frame(frame, self._post_results_count)
@@ -664,6 +744,16 @@ class GameStateMachine:
             # Pre-placement window: keep a rolling buffer of the most recent
             # frames so we can dump them once placements first appear.
             self._pre_results_buffer.append(frame.copy())
+        if (not has_results and not self._seen_race_results and
+                self._match_settings is not None and
+                self._match_settings.teams == "No Teams" and
+                self.player_count == 24 and
+                self._dark_race_result_model is not None):
+            # The high-rank rows on a scrolling 24p board can appear before
+            # the generic +point signal first fires. Keep up to two seconds
+            # solely for the local model; Gemini still receives its original
+            # result-frame list.
+            self._model_pre_result_frames.append(frame.copy())
 
     def _handle_reading_results_ocr(self, frame: np.ndarray) -> None:
         """Original OCR-based race results reading."""
@@ -671,13 +761,39 @@ class GameStateMachine:
             self._match_settings is not None
             and self._match_settings.teams != "No Teams"
         )
-        result = self._result_detector.detect(frame, teams=use_teams)
+        from mktracker.detection.team_results import _bands
+
+        colored_frame = use_teams and len(_bands(frame)) >= 3
+        reader = self._color_name_model if colored_frame else self._name_model
+        model_only = reader is not None and not reader.disabled
+        result = self._result_detector.detect(
+            frame, teams=use_teams, model_only=model_only,
+            dark_model=self._name_model, color_model=self._color_name_model,
+        )
+        if result is None and model_only:
+            # Preserve the older layout detector on rooms the trained grid
+            # locator has not yet seen. The model remains the primary reader.
+            result = self._result_detector.detect(frame, teams=use_teams)
+            model_only = False
         if result is None:
             return
+        if model_only and result["type"] == "race":
+            active_reader = (self._color_name_model if "name_crop_x" in result
+                             else self._name_model)
+            if active_reader is not None and not active_reader.disabled:
+                result = active_reader.read(frame, result)
+            if not result["results"]:
+                legacy = self._result_detector.detect(frame, teams=use_teams)
+                if legacy is not None:
+                    result = legacy
 
         if result["type"] == "race":
             self._race_overall_frames = 0
             results = result["results"]
+            for place, color in result.get("team_colors", {}).items():
+                if color in ("red", "blue", "yellow", "green"):
+                    self._race_team_color_votes.setdefault(
+                        int(place), collections.Counter())[color] += 1
             consensus = "confidences" in result
             if consensus:
                 self._race_name_votes.add(result, frame_id=hash(frame.tobytes()))
@@ -719,9 +835,142 @@ class GameStateMachine:
             return  # Already captured.
 
         if load_api_key():
+            teams = self._match_settings.teams if self._match_settings else "No Teams"
+            latest_placements = len(self._races[-1].placements) if self._races else 0
+            player_count = max(self.player_count or 0, latest_placements) or 12
+            # A complete prior race roster can corroborate a model-read
+            # final card. Obscured or incomplete cards use the API path.
+            reader = (self._name_model if teams == "No Teams"
+                      else self._color_name_model)
+            roster = self._latest_final_roster(player_count)
+            # A full 24p card takes several seconds to read on the M3 Pro.
+            # Use the separate result worker so capture can continue while
+            # the model tries all verified team and no-team layouts.
+            worker = (self._dark_race_result_model if teams == "No Teams"
+                      else self._race_result_model)
+            if (player_count == 24 and teams in
+                    ("No Teams", "Two Teams", "Three Teams", "Four Teams") and
+                    worker is not None and not worker.disabled and roster):
+                self._handle_finalizing_match_model_async(frame, teams, roster)
+                return
+            model_layout = ((teams == "Two Teams" and player_count == 12) or
+                            (teams == "No Teams" and 1 <= player_count <= 24))
+            if (model_layout and reader is not None and not reader.disabled
+                    and roster):
+                local = self._match_result_detector.detect(
+                    frame, teams=teams, player_count=player_count,
+                    model_only=True,
+                )
+                if local is not None:
+                    rows = local.get("model_rows", [])
+                    reconciled = reconcile_final_rows(rows, roster)
+                    if (teams != "No Teams" or
+                            {name for _, _, name, _ in reconciled} == set(roster)):
+                        if local_final_standings(reconciled, teams, player_count) is not None:
+                            self._handle_finalizing_match_ocr(frame, result=local)
+                            return
             self._handle_finalizing_match_gemini(frame)
         else:
             self._handle_finalizing_match_ocr(frame)
+
+    def _handle_finalizing_match_model_async(
+        self, frame: np.ndarray, teams: str, roster: list[str],
+    ) -> None:
+        """Capture a loaded 24p card, then read it off the capture thread."""
+        if not self._match_result_detector._has_result_banner(frame, teams=teams):
+            return
+        if self._match_banner_seen_at is None:
+            self._match_banner_seen_at = time.monotonic()
+            self._save_frame(frame, "match_banner")
+            return
+        if time.monotonic() - self._match_banner_seen_at < 1.0:
+            return
+        self._save_frame(frame, "match_results")
+        # The snapshot is claimed exactly once. A late result is routed to
+        # this match's on-disk record if another match starts meanwhile.
+        self._match_final_results = []
+        self._transition(GameState.WAITING_FOR_MATCH)
+        threading.Thread(
+            target=self._read_keyed_final_card_model,
+            args=(frame.copy(), teams, list(roster), self._match_seq,
+                  self._match_dir),
+            name="match-final-model-results", daemon=True,
+        ).start()
+
+    def _read_keyed_final_card_model(
+        self, frame: np.ndarray, teams: str, roster: list[str],
+        match_seq: int, match_dir: Path | None,
+    ) -> None:
+        """Try a complete model card, falling back to the existing API."""
+        reader = (self._dark_race_result_model if teams == "No Teams"
+                  else self._race_result_model)
+        lock = (self._dark_race_result_model_lock if teams == "No Teams"
+                else self._race_result_model_lock)
+        try:
+            assert reader is not None
+            detector = MatchResultDetector(
+                dark_model=reader if teams == "No Teams" else None,
+                color_model=reader if teams != "No Teams" else None,
+            )
+            with lock:
+                local = detector.detect(
+                    frame, teams=teams, player_count=len(roster),
+                    model_only=True,
+                )
+            if local is not None and not reader.disabled:
+                rows = reconcile_final_rows(local.get("model_rows", []), roster)
+                if {name for _, _, name, _ in rows} == set(roster):
+                    standings = local_final_standings(rows, teams, len(roster))
+                    if standings is not None:
+                        self._store_local_final_card(
+                            rows, standings, match_seq, match_dir,
+                        )
+                        logger.info("Trained model resolved all %d final scores", len(rows))
+                        return
+            logger.info("Trained final card incomplete; using Gemini fallback")
+        except Exception:
+            logger.exception("Trained final-card read failed; using Gemini fallback")
+        request_match_results(
+            frame,
+            self._make_match_results_callback(match_seq, match_dir),
+            log_dir=match_dir,
+        )
+
+    def _store_local_final_card(
+        self, rows: list[tuple[int, int, str, int]],
+        standings: FinalStandings, match_seq: int, match_dir: Path | None,
+    ) -> None:
+        with self._races_lock:
+            if match_seq != self._match_seq:
+                self._apply_stale_local_final_card(match_dir, standings)
+                return
+            self._match_final_results = [(name, score) for _, _, name, score in rows]
+            self._local_final_standings = standings
+            self._match_completed_at = datetime.now()
+            self._dump_match_summary()
+            self._save_match_record()
+            self._notify_match_ended()
+
+    def _apply_stale_local_final_card(
+        self, match_dir: Path | None, standings: FinalStandings,
+    ) -> None:
+        record = self._load_stale_record(match_dir)
+        if record is None:
+            return
+        record.final_standings = standings
+        if record.completed_at is None:
+            record.completed_at = datetime.now().isoformat()
+        assert match_dir is not None
+        self._save_match_table(match_dir, record)
+        self._save_stale_record(match_dir, record)
+
+    def _latest_final_roster(self, player_count: int) -> list[str]:
+        """Use the latest complete race roster to check final-card names."""
+        for race in reversed(self._races):
+            for names in ([name for _, name in race.placements], list(race.players)):
+                if len(names) == player_count and len(set(names)) == player_count:
+                    return names
+        return []
 
     def _handle_finalizing_match_gemini(self, frame: np.ndarray) -> None:
         """Two-phase detection: spot the banner first, then wait 1s for
@@ -753,18 +1002,31 @@ class GameStateMachine:
         logger.info("Match results frame sent to Gemini")
         self._transition(GameState.WAITING_FOR_MATCH)
 
-    def _handle_finalizing_match_ocr(self, frame: np.ndarray) -> None:
+    def _handle_finalizing_match_ocr(self, frame: np.ndarray,
+                                     result: dict | None = None) -> None:
         """Original OCR-based match results reading."""
         teams = self._match_settings.teams if self._match_settings else "No Teams"
         player_count = self.player_count or 12
 
-        result = self._match_result_detector.detect(
-            frame, teams=teams, player_count=player_count,
-        )
+        if result is None:
+            result = self._match_result_detector.detect(
+                frame, teams=teams, player_count=player_count,
+            )
         if result is None:
             return
 
+        model_rows = result.get("model_rows")
+        if model_rows:
+            roster = self._latest_final_roster(len(model_rows))
+            if roster:
+                model_rows = reconcile_final_rows(model_rows, roster)
+            result = {**result,
+                      "results": [(name, score) for _, _, name, score in model_rows],
+                      "model_rows": model_rows}
         self._match_final_results = result["results"]
+        self._local_final_standings = local_final_standings(
+            result.get("model_rows", []), teams, player_count,
+        )
         self._match_completed_at = datetime.now()
         self._save_frame(frame, "match_results")
         logger.info("Match final results:")
@@ -848,26 +1110,60 @@ class GameStateMachine:
     def _finalise_race_placements(self) -> None:
         """Log and store accumulated race placements.
 
-        When Gemini frames have been collected, fires an async API call
-        instead of using the OCR-accumulated placements.
+        Collected keyed frames go through the trained team reader in a
+        background thread when supported; incomplete reads fall back to the
+        existing async Gemini request.
         """
         if self._result_frames:
-            # Gemini path — fire async call with collected frames.
+            frames = self._result_frames
+            self._result_frames = []
+            pre_frames = list(self._model_pre_result_frames)
+            self._model_pre_result_frames.clear()
             race_index = len(self._races) - 1
             race_num = race_index + 1
             race_log_dir = self._race_dir(race_num)
             teams_setting = (
                 self._match_settings.teams if self._match_settings else None
             )
+            player_count = self.player_count or 0
+            expected = (24 if teams_setting == "No Teams" else
+                        player_count if teams_setting in TEAM_COLOR_ORDER
+                        and player_count in (12, 24) else 0)
+            preview = self._preview_roster.names()
+            roster = (preview if len(preview) == expected else
+                      list(self._races[race_index].players)
+                      if race_index >= 0 else [])
+            reader = self._race_result_model
+            team_model_size = ((teams_setting == "Two Teams" and len(roster) == 12)
+                               or (teams_setting in TEAM_COLOR_ORDER and
+                                   len(roster) == 24))
+            if (team_model_size and
+                    reader is not None and not reader.disabled):
+                threading.Thread(
+                    target=self._read_keyed_race_results_model,
+                    args=(frames, race_index, self._match_seq,
+                          self._match_dir, race_log_dir, roster, teams_setting),
+                    name=f"race-{race_num}-model-results", daemon=True,
+                ).start()
+                return
+            dark_reader = self._dark_race_result_model
+            if (teams_setting == "No Teams" and len(roster) == 24 and
+                    dark_reader is not None and not dark_reader.disabled):
+                threading.Thread(
+                    target=self._read_keyed_dark_race_results_model,
+                    args=(frames, pre_frames, race_index, self._match_seq,
+                          self._match_dir, race_log_dir, roster),
+                    name=f"race-{race_num}-dark-model-results", daemon=True,
+                ).start()
+                return
             request_race_results(
-                list(self._result_frames), race_num,
+                frames, race_num,
                 self._make_results_callback(
                     race_index, self._match_seq, self._match_dir,
                 ),
                 log_dir=race_log_dir,
                 teams_setting=teams_setting,
             )
-            self._result_frames = []
             return
 
         # OCR path — use accumulated placements.
@@ -881,13 +1177,281 @@ class GameStateMachine:
 
         # Update the most recent RaceInfo with placements.
         if self._races:
+            placements = sorted(self._race_placements.items())
+            colors = {place: votes.most_common(1)[0][0]
+                      for place, votes in self._race_team_color_votes.items() if votes}
+            teams_setting = self._match_settings.teams if self._match_settings else "No Teams"
+            structured = local_race_teams(placements, colors, teams_setting)
             with self._races_lock:
                 old = self._races[-1]
                 self._races[-1] = dataclasses.replace(
                     old,
-                    placements=tuple(sorted(self._race_placements.items())),
+                    placements=tuple(placements), local_results=structured,
                 )
                 self._save_match_record()
+
+    def _read_keyed_race_results_model(
+        self, frames: list[np.ndarray], race_index: int, match_seq: int,
+        match_dir: Path | None, log_dir: Path | None, roster: list[str],
+        teams_setting: str = "Two Teams",
+    ) -> None:
+        """Read collected team frames without blocking Live View."""
+        race_num = race_index + 1
+        reader = self._race_result_model
+        try:
+            assert reader is not None
+            votes = PlacementConsensus(roster)
+            color_votes: dict[int, collections.Counter[str]] = {}
+            frame_budget = 20 if len(roster) == 24 else 12
+            stride = max(1, (len(frames) + frame_budget - 1) // frame_budget)
+            selected = list(enumerate(frames))[::stride]
+            if selected and selected[-1][0] != len(frames) - 1:
+                selected.append((len(frames) - 1, frames[-1]))
+            resolved = None
+            with self._race_result_model_lock:
+                if len(roster) == 24:
+                    from mktracker.detection.team_results import _bands
+                    candidates = []
+                    for frame_id, frame in selected:
+                        # Dark multi-team boards have no visible team-color
+                        # partition. Leave those to Gemini rather than
+                        # assigning teams from names or invoking legacy OCR.
+                        if len(_bands(frame)) < 3:
+                            continue
+                        grid = self._result_detector.detect(
+                            frame, teams=True, model_only=True,
+                            color_model=reader, rank_only=True,
+                        )
+                        if grid and grid.get("type") == "race":
+                            candidates.append((frame_id, frame, grid))
+                    remaining = {rank: 2 for rank in range(1, 25)}
+                    ordered = []
+                    pending = list(candidates)
+                    while pending and any(remaining.values()):
+                        best = max(pending, key=lambda item:
+                                   sum(remaining.get(rank, 0) > 0
+                                       for rank in item[2]["row_centers"]))
+                        if not any(remaining.get(rank, 0) > 0
+                                   for rank in best[2]["row_centers"]):
+                            break
+                        ordered.append(best)
+                        pending.remove(best)
+                        for rank in best[2]["row_centers"]:
+                            if rank in remaining:
+                                remaining[rank] = max(0, remaining[rank] - 1)
+                    if any(remaining.values()):
+                        ordered = []
+                else:
+                    ordered = [(frame_id, frame, None)
+                               for frame_id, frame in selected]
+                for frame_id, frame, grid in ordered:
+                    if grid is None:
+                        grid = self._result_detector.detect(
+                            frame, teams=True, model_only=True,
+                            color_model=reader,
+                        )
+                        if not grid or grid.get("type") != "race":
+                            continue
+                    result = reader.read(frame, grid)
+                    votes.add(result, frame_id=frame_id)
+                    for place, color in result.get("team_colors", {}).items():
+                        if color in TEAM_COLOR_ORDER.get(teams_setting, ()):
+                            color_votes.setdefault(int(place), collections.Counter())[color] += 1
+                    resolved = self._resolve_keyed_race_votes(
+                        votes, color_votes, roster, teams_setting)
+                    if resolved is not None:
+                        break
+                if resolved is None and len(roster) == 24 and ordered:
+                    used_frames = {frame_id for frame_id, _, _ in ordered}
+                    spare = [item for item in candidates if item[0] not in used_frames]
+                    for _ in range(4):
+                        evidence = votes.evidence()
+                        missing = {rank for rank in range(1, 25)
+                                   if evidence.get(str(rank), {}).get("frames", 0) < 2}
+                        if not missing or not spare:
+                            break
+                        best = max(spare, key=lambda item:
+                                   len(missing.intersection(item[2]["row_centers"])))
+                        if not missing.intersection(best[2]["row_centers"]):
+                            break
+                        spare.remove(best)
+                        frame_id, frame, grid = best
+                        result = reader.read(frame, grid)
+                        votes.add(result, frame_id=frame_id)
+                        for place, color in result.get("team_colors", {}).items():
+                            if color in TEAM_COLOR_ORDER.get(teams_setting, ()):
+                                color_votes.setdefault(int(place), collections.Counter())[color] += 1
+                        resolved = self._resolve_keyed_race_votes(
+                            votes, color_votes, roster, teams_setting)
+                        if resolved is not None:
+                            break
+                if reader.disabled:
+                    raise RuntimeError("trained result reader became unavailable")
+            if resolved is not None:
+                structured, placements = resolved
+                self._store_local_keyed_race_results(
+                    race_index, match_seq, match_dir, structured, placements,
+                )
+                logger.info("Race %d: trained model resolved all %d team placements",
+                            race_num, len(placements))
+                return
+            logger.info("Race %d: trained result incomplete; using Gemini fallback", race_num)
+        except Exception:
+            logger.exception("Race %d: trained result read failed; using Gemini fallback", race_num)
+        request_race_results(
+            frames, race_num,
+            self._make_results_callback(race_index, match_seq, match_dir),
+            log_dir=log_dir, teams_setting=teams_setting,
+        )
+
+    @staticmethod
+    def _resolve_keyed_race_votes(
+        votes: PlacementConsensus,
+        color_votes: dict[int, collections.Counter[str]],
+        roster: list[str],
+        teams_setting: str = "Two Teams",
+    ) -> tuple[dict, list[tuple[int, str]]] | None:
+        placements = [(int(place), name) for place, name in votes.placements()]
+        expected = len(roster)
+        if (expected not in (12, 24) or
+                [place for place, _ in placements] != list(range(1, expected + 1)) or
+                len(set(roster)) != expected):
+            return None
+        evidence = votes.evidence()
+        if any(evidence.get(str(place), {}).get("frames", 0) < 2
+               for place in range(1, expected + 1)):
+            return None
+        rows = [(0, place, name, 0) for place, name in placements]
+        reconciled = reconcile_final_rows(rows, roster, min_similarity=.75)
+
+        def digits(value: str) -> str:
+            return "".join(char for char in unicodedata.normalize("NFKC", value)
+                           if char.isdecimal())
+
+        if (any(digits(old[2]) and digits(new[2]) and
+                digits(old[2]) != digits(new[2])
+                for old, new in zip(rows, reconciled)) or
+                {name for _, _, name, _ in reconciled} != set(roster)):
+            return None
+        placements = [(place, name) for _, place, name, _ in reconciled]
+        colors = {}
+        for place, counts in color_votes.items():
+            ranked = counts.most_common()
+            if ranked and (len(ranked) == 1 or ranked[0][1] > ranked[1][1]):
+                colors[place] = ranked[0][0]
+        structured = local_race_teams(placements, colors, teams_setting)
+        return (structured, placements) if structured is not None else None
+
+    def _read_keyed_dark_race_results_model(
+        self, frames: list[np.ndarray], pre_frames: list[np.ndarray],
+        race_index: int, match_seq: int, match_dir: Path | None,
+        log_dir: Path | None, roster: list[str],
+    ) -> None:
+        """Read a scrolling 24p no-team board, including its leading tail."""
+        race_num = race_index + 1
+        reader = self._dark_race_result_model
+        try:
+            assert reader is not None
+            votes = PlacementConsensus(roster)
+            stride = max(1, (len(frames) + 11) // 12)
+            selected = list(pre_frames) + frames[::stride]
+            if frames and selected[-1] is not frames[-1]:
+                selected.append(frames[-1])
+            resolved = None
+            with self._dark_race_result_model_lock:
+                candidates = []
+                for frame_id, frame in enumerate(selected):
+                    grid = self._result_detector.detect(
+                        frame, teams=True, model_only=True,
+                        dark_model=reader, rank_only=True,
+                    )
+                    if grid and grid.get("type") == "race":
+                        candidates.append((frame_id, frame, grid))
+                # A fast rank-only pass can reject an incomplete scroll
+                # before spending time on 320px name inference.
+                covered = set().union(*(set(grid["row_centers"])
+                                        for _, _, grid in candidates))
+                if set(range(1, 25)) <= covered:
+                    remaining = set(range(1, 25))
+                    pending = list(candidates)
+                    ordered = []
+                    while remaining:
+                        best = max(pending, key=lambda item:
+                                   len(set(item[2]["row_centers"]) & remaining))
+                        ordered.append(best)
+                        pending.remove(best)
+                        remaining -= set(best[2]["row_centers"])
+                    for frame_id, frame, grid in ordered + pending:
+                        votes.add(reader.read(frame, grid), frame_id=frame_id)
+                        resolved = self._resolve_keyed_dark_race_votes(votes, roster)
+                        if resolved is not None:
+                            break
+                if reader.disabled:
+                    raise RuntimeError("trained dark result reader became unavailable")
+            if resolved is not None:
+                placements = resolved
+                structured = {
+                    "mode": "no_teams",
+                    "teams": [{
+                        "name": None, "tag": None,
+                        "race_points": None, "race_winner": None,
+                        "players": [{"place": place, "name": name}
+                                    for place, name in placements],
+                    }],
+                }
+                self._store_local_keyed_race_results(
+                    race_index, match_seq, match_dir, structured, placements,
+                )
+                logger.info("Race %d: trained model resolved all 24 placements", race_num)
+                return
+            logger.info("Race %d: trained 24p result incomplete; using Gemini", race_num)
+        except Exception:
+            logger.exception("Race %d: trained 24p result failed; using Gemini", race_num)
+        request_race_results(
+            frames, race_num,
+            self._make_results_callback(race_index, match_seq, match_dir),
+            log_dir=log_dir, teams_setting="No Teams",
+        )
+
+    @staticmethod
+    def _resolve_keyed_dark_race_votes(
+        votes: PlacementConsensus, roster: list[str],
+    ) -> list[tuple[int, str]] | None:
+        placements = [(int(place), name) for place, name in votes.placements()]
+        if ([place for place, _ in placements] != list(range(1, 25)) or
+                len(set(roster)) != 24):
+            return None
+        rows = [(0, place, name, 0) for place, name in placements]
+        reconciled = reconcile_final_rows(rows, roster, min_similarity=.75)
+
+        def digits(value: str) -> str:
+            return "".join(char for char in unicodedata.normalize("NFKC", value)
+                           if char.isdecimal())
+
+        if (any(digits(old[2]) and digits(new[2]) and
+                digits(old[2]) != digits(new[2])
+                for old, new in zip(rows, reconciled)) or
+                {name for _, _, name, _ in reconciled} != set(roster)):
+            return None
+        return [(place, name) for _, place, name, _ in reconciled]
+
+    def _store_local_keyed_race_results(
+        self, race_index: int, match_seq: int, match_dir: Path | None,
+        structured: dict, placements: list[tuple[int, str]],
+    ) -> None:
+        with self._races_lock:
+            if match_seq != self._match_seq:
+                self._apply_stale_results(match_dir, race_index, structured, placements)
+                return
+            if not 0 <= race_index < len(self._races):
+                logger.warning("Local results callback: race index %d out of range", race_index)
+                return
+            old = self._races[race_index]
+            self._races[race_index] = dataclasses.replace(
+                old, placements=tuple(placements), local_results=structured,
+            )
+            self._save_match_record()
+            self._notify_race_results(race_index)
 
     def _make_results_callback(
         self,
@@ -1011,12 +1575,12 @@ class GameStateMachine:
     def _build_race_record(cls, race_number: int, race: RaceInfo) -> RaceRecord:
         """Convert a :class:`RaceInfo` into a serialisable :class:`RaceRecord`.
 
-        When Gemini structured data is available it is used as the source
-        of truth (richer team info); otherwise the flat OCR placements are
-        used and team fields are left ``None``.
+        Structured Gemini or local colour-group data preserves team scores;
+        otherwise flat placements are retained without team fields.
         """
-        if race.gemini_results:
-            mode, teams, placements = cls._race_fields_from_gemini(race.gemini_results)
+        structured = race.gemini_results or race.local_results
+        if structured:
+            mode, teams, placements = cls._race_fields_from_gemini(structured)
             teams_field: list[TeamGroup] | None = teams
         else:
             mode = None
@@ -1042,6 +1606,9 @@ class GameStateMachine:
         gemini = self._gemini_match_results
         if gemini:
             return self._final_standings_from_gemini(gemini)
+
+        if self._local_final_standings is not None:
+            return self._local_final_standings
 
         flat = self._match_final_results
         if flat:
@@ -1376,7 +1943,7 @@ class GameStateMachine:
         """Post a race-results embed to the webhook when *team mode* is
         active and scores could be computed from the just-written results.
 
-        Fires once per race, after the Gemini results callback has stored
+        Fires once per race after a Gemini or local model callback has stored
         placements + team groups into the on-disk record. No-op for FFA
         (no team mode), for OCR-only data without team structure, or when
         the event toggle is off. Runs on a daemon thread.

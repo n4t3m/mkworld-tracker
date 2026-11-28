@@ -72,7 +72,9 @@ def test_other_screens_and_remaining_visible_huds(path):
     # These files still show the in-race HUD despite their fixture folder.
     expected = {"20260329_144018.png": 4, "bad_finish_banner_blue_sky.png": 7,
                 "result-animation.jpg": 4,
-                "ghost-valley-false-results.jpg": 20}.get(path.name)
+                "ghost-valley-false-results.jpg": 20,
+                "race-start-course-card-24p.jpg": 0,
+                "race-start-course-card-koopa-24p.jpg": 1}.get(path.name)
     assert HudCoinReader().read(cv2.imread(str(path))) == expected
 
 

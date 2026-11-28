@@ -37,6 +37,11 @@ assets/demo/
 
 # Downloaded fonts (cached at runtime, not committed)
 src/mktracker/assets/fonts/*.ttf
+*.ttf
+*.otf
+
+# OCR training corpus lives in the separate private research repository.
+tests/fixtures/name_ocr*/
 
 # Test data provided externally (not tracked)
 testdata/
