@@ -51,8 +51,15 @@ paths; current source and this handoff take precedence over those descriptions.
   custom-room name reading, repeated-frame/preview corroboration and optional
   game-font matching. A name's `[review]` flag describes conflicting or limited
   evidence, not a calibrated probability of error.
-- `src/mktracker/detection/race_rank.py` and `gemini_rank.py`: older live/API
-  rank path; separate from the new local Video Review reader.
+- `name_model.py` and `name_ocr_worker.py`: optional persistent PaddleOCR readers.
+  The dark checkpoint reads result names and ranks; a separate colored checkpoint
+  reads colored rows and preview rosters. `course_model.py`, `hud_rank_model.py`,
+  `match_results_model.py`, and `saved_race_model.py` apply those readers to their
+  respective screens. `state_machine.py` and `video_analysis.py` select local
+  model reads where supported, then retain Tesseract and Gemini fallbacks.
+  Inspect each caller's completeness and roster checks before broadening model use.
+- `src/mktracker/detection/race_rank.py` and `gemini_rank.py`: legacy live/API
+  rank paths; `hud_rank_model.py` adds local model reading to Live View.
 - `src/mktracker/detection/tracks.py`: shared 48-course catalog through 1.9.0.
 
 ## New machine setup
@@ -72,11 +79,26 @@ not a requirement; `uv sync --locked` creates `.venv` on a clean machine. Never
 copy virtual environments between computers. Windows has been exercised;
 macOS/Linux capture and OCR setup still need platform verification.
 
+For trained OCR, install the dark and color checkpoint release assets from the
+private `n4t3m/mkworld-tracker-ocr` repository. Follow that repository's README
+to generate local YAML files and `characters.txt`. Set `NAME_OCR_PYTHON` to a
+separate Python with PaddlePaddle, `NAME_OCR_PADDLEOCR` to a compatible
+PaddleOCR source checkout, and the dark/color `NAME_OCR_*_CONFIG` and
+`NAME_OCR_*_CHECKPOINT` variables in the ignored `.env`. The runtime configs
+contain an absolute `character_dict_path`; regenerate them after moving the
+files. This app can still run without checkpoints using its fallback readers.
+
 ## What Git does and does not carry
 
 - Git carries application code, uv.lock, position templates, and regression
   crops/labels in `tests/fixtures/`. Position tests need no recordings, game
   font, Tesseract process or API key; video-review integration tests use OCR.
+- The private `n4t3m/mkworld-tracker-ocr` repository carries the labeled
+  name-crop corpus, training/evaluation scripts, experiment log, and portable
+  config templates. Selected `.pdparams` weights are private GitHub release
+  assets (`ocr-v1`), outside Git history. Neither repository carries the game
+  font. Keep model weights, generated runtime configs, and the font out of
+  application commits.
 - Full recordings and the optional game font are external assets. Copy them
   separately if needed; select the font again in Settings on the new machine.
   `.env.example` documents the settings, including `GAME_FONT_PATH`.
@@ -108,6 +130,11 @@ The feature baseline was 229 passing tests. Counts are historical evidence,
 not a substitute for running current tests. Qt tests select offscreen mode.
 The broader suite includes optional local-font tests and older tests that need
 ignored `testdata/`; inspect skips/failures before claiming full-suite coverage.
+For OCR changes, run focused model and video-review tests and consult the
+private repository's model log for recording-separated evaluations. The
+November 2026 app OCR run had 193 passes and two legacy Tesseract name misses
+(`KT`/`Rte` and `KT viti`/`viti`); the same misses reproduce with the
+pre-OCR detector. Do not attribute those two assertions to the repo split.
 
 Position fixtures include separate template-source and validation timestamps;
 `labels.json`, `labels_24p.json` and `fades.json` record manually assigned values. Tests cover
